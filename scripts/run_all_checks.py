@@ -39,8 +39,7 @@ def checks(reset_cycles: int, episodes: int):
         ("remote", "M5", "Modal TLS echo through tunnel", modal("echo_check")),
         ("remote", "M6", "Modal L4 GPU check", modal("gpu_check")),
         ("remote", "M6", "Modal 1,000 SAC updates + checkpoint restart", modal("benchmark", "--updates", "1000")),
-        ("remote", "M7", "weights round-trip Windows <-> Modal", ["scripts/smoke_pipeline.py", "remote", "--updates", "10"]
-            if modal_app else None),
+        ("remote", "M7", "weights round-trip Windows <-> Modal", modal("roundtrip_check")),
     ]
 
 

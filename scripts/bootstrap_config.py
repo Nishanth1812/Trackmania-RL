@@ -36,6 +36,7 @@ def main(argv=None) -> int:
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--run-name", default=None)
     p.add_argument("--smoke", action="store_true")
+    p.add_argument("--tls-dir", default=None, help="folder holding the pinned certificate.pem (and key.pem on the server)")
     a = p.parse_args(argv)
 
     password = os.environ.get("TMRL_PASSWORD", "")
@@ -59,6 +60,8 @@ def main(argv=None) -> int:
         eff["PUBLIC_IP_SERVER"] = a.server
         if a.port:
             eff["PORT"] = a.port
+    if a.tls_dir:
+        eff["TLS_CREDENTIALS_DIRECTORY"] = str(Path(a.tls_dir).resolve())
     if a.run_name:
         eff["RUN_NAME"] = a.run_name
     if a.smoke:

@@ -143,21 +143,25 @@ class ProjectTrainingOffline(TorchTrainingOffline):
 
 def build_training_cls():
     observation_space, action_space = build_spaces()
+    smoke = cfg.TMRL_CONFIG["PROJECT"]["route_path"] == SMOKE_NO_ROUTE
+    # Smoke runs publish after every short epoch so a round-trip cannot wait on production thresholds.
+    schedule = (
+        {"rounds": 1, "steps": 10, "start_training": 64, "update_model_interval": 1}
+        if smoke
+        else {"rounds": 10, "steps": 100, "start_training": 2000, "update_model_interval": 100}
+    )
     return partial(
         ProjectTrainingOffline,
         env_cls=(observation_space, action_space),
         memory_cls=partial(GenericTorchMemory, memory_size=MEMORY_SIZE, batch_size=BATCH_SIZE),
         training_agent_cls=build_agent_cls(),
         epochs=10000,
-        rounds=10,
-        steps=100,
-        start_training=2000,
         max_training_steps_per_env_step=1.0,
-        update_model_interval=100,
         update_buffer_interval=1,
         sleep_between_buffer_retrieval_attempts=1.0,
         profiling=False,
         device=TRAINER_DEVICE,
+        **schedule,
     )
 
 

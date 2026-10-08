@@ -112,9 +112,131 @@ def cmd_echo_client(host, port, cert):
     return 0 if all(ok for _, ok in cases) else 1
 
 
+class SyntheticEnv:
+    """Game-free environment with the production spaces: deterministic obs, reward = 0.01*step."""
+
+    EPISODE_STEPS = 100
+
+    def __init__(self):
+        self.observation_space, self.action_space = build_spaces()
+        self.default_action = np.zeros(3, dtype=np.float32)
+        self.unwrapped = self
+        self._t = 0
+
+    def _obs(self, t):
+        rng = np.random.default_rng(t)
+        base = rng.uniform(-1.0, 1.0, size=15).astype(np.float32)
+        base[:3] = np.abs(base[:3])
+        base[14] = abs(base[14])
+        return (base, np.zeros(3, dtype=np.float32), np.zeros(3, dtype=np.float32))
+
+    def reset(self, **_):
+        self._t = 0
+        return self._obs(0), {}
+
+    def step(self, action):
+        self._t += 1
+        return self._obs(self._t), 0.01 * self._t, self._t >= self.EPISODE_STEPS, False, {}
+
+
+def actor_digest(actor):
+    import hashlib
+
+    h = hashlib.sha256()
+    for name, tensor in sorted(actor.state_dict().items()):
+        h.update(name.encode())
+        h.update(tensor.detach().cpu().numpy().tobytes())
+    return h.hexdigest()
+
+
+FIXED_OBS_SEED = 123456
+
+
+def cmd_remote(updates, timeout_s):
+    """M7: synthetic episodes out to the Modal trainer, updated actor weights back to Windows (no game)."""
+    import time
+
+    from tmrl.config import config_constants as cfg
+    from tmrl.custom.custom_models import SquashedGaussianMLPActor
+    from tmrl.networking import RolloutWorker
+    from tmrl.util import partial
+
+    from src.pipeline import HIDDEN_SIZES, MAX_SAMPLES_PER_EPISODE, worker_model_path
+
+    assert cfg.SECURITY == "TLS", "remote check requires TLS"
+    worker = RolloutWorker(
+        env_cls=SyntheticEnv,
+        actor_module_cls=partial(SquashedGaussianMLPActor, hidden_sizes=HIDDEN_SIZES),
+        sample_compressor=None,
+        obs_preprocessor=None,
+        device="cpu",
+        max_samples_per_episode=MAX_SAMPLES_PER_EPISODE,
+        model_path=str(worker_model_path()),
+        standalone=False,
+        server_ip=cfg.PUBLIC_IP_SERVER,
+        server_port=cfg.PORT,
+        password=cfg.PASSWORD,
+        local_port=cfg.LOCAL_PORT_WORKER,
+        header_size=cfg.HEADER_SIZE,
+        max_buf_len=cfg.BUFFER_SIZE,
+        security=cfg.SECURITY,
+        keys_dir=cfg.CREDENTIALS_DIRECTORY,
+        hostname=cfg.HOSTNAME,
+    )
+    fixed_obs = SyntheticEnv()._obs(FIXED_OBS_SEED)
+    initial_digest = actor_digest(worker.actor)
+    received = 0
+    digests = []
+    start = time.monotonic()
+    episodes = 0
+    while time.monotonic() - start < timeout_s:
+        if episodes < 8 or episodes % 5 == 0:  # keep the trainer fed without flooding it
+            worker.collect_train_episode(max_samples=SyntheticEnv.EPISODE_STEPS)
+            assert len(worker.buffer.memory) == SyntheticEnv.EPISODE_STEPS + 1, len(worker.buffer.memory)
+            worker.send_and_clear_buffer()
+        episodes += 1
+        got = worker.update_actor_weights(verbose=False)
+        if got:
+            received += got
+            digests.append(actor_digest(worker.actor))
+            if len(set(digests)) >= 2:
+                break
+        time.sleep(1.0)
+
+    ok_received = len(set(digests)) >= 2
+    print(f"{'PASS' if ok_received else 'FAIL'}: sent {episodes} synthetic episodes; "
+          f"received {received} actor publications with {len(set(digests))} distinct weight sets", flush=True)
+    if not ok_received:
+        return 1
+
+    import torch
+
+    saved = worker.actor.load(str(worker_model_path()), device="cpu")
+    same_file = actor_digest(saved) == actor_digest(worker.actor)
+    with torch.no_grad():
+        a1 = worker.actor.act_(fixed_obs, test=True)
+        a2 = saved.act_(fixed_obs, test=True)
+    finite = bool(np.all(np.isfinite(a1))) and bool(np.all(np.abs(a1) <= 1.0)) and a1.shape == (3,)
+    deterministic = bool(np.allclose(a1, a2, atol=1e-5, rtol=1e-5))
+    changed = actor_digest(worker.actor) != initial_digest
+    checks = [
+        ("saved weights reload to the identical actor", same_file),
+        ("fixed-observation action finite, in [-1,1], shape (3,)", finite),
+        ("action reproducible across reloads (1e-5)", deterministic),
+        ("returned actor differs from the local initial actor", changed),
+    ]
+    for name, ok in checks:
+        print(f"{'PASS' if ok else 'FAIL'}: {name}", flush=True)
+    print(f"actor sha256 {actor_digest(worker.actor)[:16]}  fixed-obs action {np.round(a1, 4).tolist()}", flush=True)
+    return 0 if all(ok for _, ok in checks) else 1
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="mode", required=True)
+    remote = sub.add_parser("remote", help="synthetic episodes to the Modal trainer and weights back")
+    remote.add_argument("--updates", type=int, default=10, help="kept for the runner; smoke epochs are 10 updates")
+    remote.add_argument("--timeout", type=float, default=300.0)
     echo = sub.add_parser("echo-client", help="TLS echo check against the Modal tunnel")
     echo.add_argument("--host", required=True)
     echo.add_argument("--port", type=int, required=True)
@@ -124,6 +246,8 @@ def main(argv=None):
     a = p.parse_args(argv)
     if a.mode == "local":
         return cmd_local(a.updates)
+    if a.mode == "remote":
+        return cmd_remote(a.updates, a.timeout)
     if a.mode == "echo-client":
         return cmd_echo_client(a.host, a.port, a.cert)
     return 2

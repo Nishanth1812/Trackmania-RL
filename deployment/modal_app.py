@@ -287,3 +287,42 @@ def trainer_service(run_name: str = "pipeline_smoke", smoke: bool = True):
             except subprocess.TimeoutExpired:
                 proc.kill()
         vol.commit()
+
+
+@app.local_entrypoint()
+def roundtrip_check():
+    """M7: start the real server+trainer, run the game-free Windows worker against it, then stop everything."""
+    import shutil
+
+    root = Path(__file__).resolve().parents[1]
+    py = sys.executable
+    t0 = time.time()
+    call = trainer_service.spawn(run_name="pipeline_smoke", smoke=True)
+    cfg_path = Path.home() / "TmrlData" / "config" / "config.json"
+    backup = cfg_path.with_suffix(".json.bak")
+    rc = 1
+    try:
+        addr = None
+        end = time.monotonic() + 420
+        while time.monotonic() < end:
+            addr = endpoint.get("address", None)
+            if addr and addr["started"] > t0:
+                break
+            addr = None
+            time.sleep(3)
+        if addr is None:
+            print("FAIL: trainer service never published an address", flush=True)
+            sys.exit(1)
+        shutil.copy2(cfg_path, backup)  # the game smoke tests share this effective config; restore it afterwards
+        subprocess.run(
+            [py, "scripts/bootstrap_config.py", "--profile", "windows", "--server", addr["host"],
+             "--port", str(addr["port"]), "--run-name", "pipeline_smoke", "--smoke",
+             "--tls-dir", str(root / "secrets_local")],
+            cwd=root, check=True,
+        )
+        rc = subprocess.run([py, "scripts/smoke_pipeline.py", "remote", "--updates", "10"], cwd=root).returncode
+    finally:
+        if backup.exists():
+            shutil.move(str(backup), str(cfg_path))
+        call.cancel()
+    sys.exit(rc)
