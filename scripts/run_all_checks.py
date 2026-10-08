@@ -36,7 +36,7 @@ def checks(reset_cycles: int, episodes: int):
         ("live", "M2", "gamepad controls", SMOKE_LOCAL + ["controls"]),
         ("live", "M3", f"reset x{reset_cycles}", SMOKE_LOCAL + ["reset", "--cycles", str(reset_cycles)]),
         ("live", "M4", f"environment x{episodes} episodes", SMOKE_LOCAL + ["environment", "--episodes", str(episodes)]),
-        ("remote", "M5", "Modal TLS echo through tunnel", modal("echo_server")),
+        ("remote", "M5", "Modal TLS echo through tunnel", modal("echo_check")),
         ("remote", "M6", "Modal L4 GPU check", modal("gpu_check")),
         ("remote", "M6", "Modal 1,000 SAC updates + checkpoint restart", modal("benchmark", "--updates", "1000")),
         ("remote", "M7", "weights round-trip Windows <-> Modal", ["scripts/smoke_pipeline.py", "remote", "--updates", "10"]

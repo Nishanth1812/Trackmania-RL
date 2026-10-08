@@ -62,14 +62,70 @@ def cmd_local(updates):
     return 0
 
 
+def _echo(host, port, cert, payload, tls=True):
+    """One echo exchange; returns the reply bytes or the exception class name."""
+    import socket
+    import ssl
+
+    try:
+        raw = socket.create_connection((host, port), timeout=10)
+        raw.settimeout(10)
+        if tls:
+            ctx = ssl.create_default_context(cafile=cert)
+            conn = ctx.wrap_socket(raw, server_hostname="default")  # certificate is pinned
+        else:
+            conn = raw
+        with conn:
+            conn.sendall(payload)
+            return conn.recv(64)
+    except (OSError, ssl.SSLError) as e:
+        return type(e).__name__
+
+
+def cmd_echo_client(host, port, cert):
+    """M5: TLS echo through the Modal tunnel plus the rejection cases."""
+    import os
+    import tempfile
+    import time
+
+    from make_tls_cert import generate
+
+    password = os.environ.get("TMRL_PASSWORD", "")
+    if not password:
+        print("TMRL_PASSWORD is not set.", flush=True)
+        return 2
+    t0 = time.perf_counter()
+    reply = _echo(host, port, cert, f"ping {password}".encode())
+    latency_ms = (time.perf_counter() - t0) * 1000
+    with tempfile.TemporaryDirectory() as other:
+        generate(other)
+        wrong_cert = _echo(host, port, str(Path(other) / "certificate.pem"), b"ping x")
+    cases = [
+        ("pinned cert + password -> pong", reply == b"pong"),
+        ("wrong password rejected", _echo(host, port, cert, b"ping wrong") == b"denied"),
+        ("plaintext client rejected", _echo(host, port, cert, b"ping x", tls=False) != b"pong"),
+        ("wrong pinned cert rejected", isinstance(wrong_cert, str)),
+    ]
+    for name, ok in cases:
+        print(f"{'PASS' if ok else 'FAIL'}: {name}", flush=True)
+    print(f"round-trip latency (incl. TLS handshake): {latency_ms:.0f} ms", flush=True)
+    return 0 if all(ok for _, ok in cases) else 1
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="mode", required=True)
+    echo = sub.add_parser("echo-client", help="TLS echo check against the Modal tunnel")
+    echo.add_argument("--host", required=True)
+    echo.add_argument("--port", type=int, required=True)
+    echo.add_argument("--cert", default="secrets_local/certificate.pem")
     local = sub.add_parser("local", help="synthetic CPU spaces + SAC update check")
     local.add_argument("--updates", type=int, default=1)
     a = p.parse_args(argv)
     if a.mode == "local":
         return cmd_local(a.updates)
+    if a.mode == "echo-client":
+        return cmd_echo_client(a.host, a.port, a.cert)
     return 2
 
 

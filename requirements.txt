@@ -5,3 +5,4 @@ numpy==2.5.3
 gymnasium==1.4.0
 rtgym==0.16
 tlspyo==0.3.0
+modal==1.6.1
