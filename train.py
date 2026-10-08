@@ -61,7 +61,7 @@ def main(argv=None):
     logging.info("run=%s role=%s profile=%s", cfg.RUN_NAME, a.role, a.profile)
 
     if a.role == "server":
-        Server(
+        server = Server(  # keep the reference: the relay shuts down when the object is garbage-collected
             port=cfg.PORT,
             password=cfg.PASSWORD,
             local_port=cfg.LOCAL_PORT_SERVER,
@@ -70,7 +70,10 @@ def main(argv=None):
             keys_dir=cfg.CREDENTIALS_DIRECTORY,
             max_workers=cfg.NB_WORKERS,
         )
-        _block_forever()
+        try:
+            _block_forever()
+        finally:
+            del server
     elif a.role == "trainer":
         weights, checkpoint = trainer_paths()
         Trainer(
