@@ -254,4 +254,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import os
+    import sys
+
+    code = main()
+    sys.stdout.flush()
+    # TMRL's network thread is non-daemon and would keep the process alive after the checks finish.
+    os._exit(code)
