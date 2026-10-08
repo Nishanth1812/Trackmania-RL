@@ -35,9 +35,12 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("libgl1", "libglib2.0-0")
     .pip_install(
-        "torch==2.14.1", "numpy==2.5.3", "gymnasium==1.4.0", "rtgym==0.16", "tlspyo==0.3.0", "tmrl==0.7.1"
+        "torch==2.14.1", "numpy==2.5.3", "gymnasium==1.4.0", "rtgym==0.16", "tlspyo==0.3.0",
+        "pandas", "pyyaml", "wandb", "requests", "opencv-python-headless", "mss", "pyinstrument", "chardet", "packaging",
     )
-    .run_commands("tmrl --install")
+    # tmrl hard-requires pywin32 and vgamepad (Windows only); the trainer container needs neither.
+    .pip_install("tmrl==0.7.1", extra_options="--no-deps")
+    .run_commands("python -c \"import tmrl.config.config_constants\"")  # creates ~/TmrlData (what `tmrl --install` does)
     .add_local_dir(
         ".", APP_DIR, ignore=["logs", "weights", "checkpoints", "secrets_local", ".venv", ".git", "**/__pycache__"]
     )
