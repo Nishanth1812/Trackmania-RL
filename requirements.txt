@@ -1,0 +1,7 @@
+# Shared pins (verified common packages). Windows uses CPU torch; the Modal image uses the CUDA build of the same release.
+tmrl==0.7.1
+torch==2.14.1
+numpy==2.5.3
+gymnasium==1.4.0
+rtgym==0.16
+tlspyo==0.3.0

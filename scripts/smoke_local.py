@@ -9,6 +9,7 @@ verifies the inputs appear in telemetry fields 5-7. Keep the Trackmania
 window focused and hands off other controllers during the test.
 """
 import argparse
+import os
 import socket
 import struct
 import sys
@@ -16,6 +17,7 @@ import time
 from pathlib import Path
 
 PACKET = struct.Struct("<11f")
+_COUNTDOWN = int(os.environ.get("SMOKE_COUNTDOWN", "5"))  # run_all_checks.py sets 0 after its own countdown
 
 # Telemetry field indices (TMRL_GrabData 11-float packet)
 IDX_SPEED = 0
@@ -122,7 +124,7 @@ def cmd_controls() -> int:
         return vlast
 
     pad = vgamepad.VX360Gamepad()
-    for i in (5, 4, 3, 2, 1):
+    for i in range(_COUNTDOWN, 0, -1):
         print(f"Focus Trackmania now... {i}", flush=True)
         time.sleep(1)
     print(
@@ -226,13 +228,18 @@ def cmd_reset(cycles: int) -> int:
         time.sleep(0.3)
         return True
 
-    for i in (5, 4, 3, 2, 1):
+    for i in range(_COUNTDOWN, 0, -1):
         print(f"Focus Trackmania now... {i}", flush=True)
         time.sleep(1)
 
     ok = 0
     spawn = None
     try:
+        # The car may be parked anywhere (e.g. after the controls test); restart once so the
+        # spawn reference is the real full-race start, not the current position.
+        print("Initial restart to capture the real spawn...", flush=True)
+        do_reset_b()
+        time.sleep(3.0)
         for cycle in range(1, cycles + 1):
             v = fresh_sample()
             if v is None:
@@ -286,6 +293,85 @@ def cmd_reset(cycles: int) -> int:
         sock.close()
 
 
+def cmd_environment(episodes: int) -> int:
+    import math
+
+    import numpy as np
+
+    from src.env.interface import TelemetryInterface
+    from src.env.telemetry import TelemetryClient, TelemetryError
+
+    # Part 1: offline shape/dtype/default-action contract (no game needed).
+    itf = TelemetryInterface(smoke=True)
+    obs_space, act_space = itf.get_observation_space(), itf.get_action_space()
+    assert obs_space[0].shape == (15,) and obs_space[0].dtype == np.float32
+    assert act_space.shape == (3,) and act_space.dtype == np.float32
+    dflt = itf.get_default_action()
+    assert dflt.shape == (3,) and bool(np.all(np.isfinite(dflt)))
+    (obs0, info0), (obs1, rew1, term1, info1) = itf.reset(), itf.get_obs_rew_terminated_info()
+    assert obs0[0].shape == (15,) and obs1[0].shape == (15,)
+    assert isinstance(rew1, float) and isinstance(term1, bool)
+    print("offline contract: spaces (15,)+(3,) float32, default action, reset/step shapes OK", flush=True)
+
+    # Part 2: live episodes against the game.
+    try:
+        client = TelemetryClient()
+    except Exception as e:  # noqa: BLE001
+        print(f"No telemetry on 9000 ({e}). Reload TMRL_GrabData, then retry.", flush=True)
+        return 2
+    import vgamepad
+    from tmrl.custom.tm.utils.control_gamepad import control_gamepad, gamepad_reset
+
+    pad = vgamepad.VX360Gamepad()
+    for i in range(_COUNTDOWN, 0, -1):
+        print(f"Focus Trackmania now... {i}", flush=True)
+        time.sleep(1)
+    ok = 0
+    try:
+        for ep in range(1, episodes + 1):
+            control_gamepad(pad, [0.0, 0.0, 0.0])
+            pre = client.latest()
+            gamepad_reset(pad)
+            time.sleep(2.0)
+            try:
+                t0 = client.latest()
+            except TelemetryError as e:
+                print(f"[{ep}] FAIL: {e}", flush=True)
+                continue
+            reset_moved = math.dist((t0.pos_x, t0.pos_y, t0.pos_z), (pre.pos_x, pre.pos_y, pre.pos_z))
+            start, max_spd, max_gas, n = (t0.pos_x, t0.pos_y, t0.pos_z), 0.0, 0.0, 0
+            end = time.monotonic() + 3.0
+            live_ok = True
+            while time.monotonic() < end:
+                control_gamepad(pad, [0.8, 0.0, 0.0])
+                try:
+                    t = client.latest()
+                except TelemetryError:
+                    live_ok = False
+                    break
+                if not all(math.isfinite(x) for x in (t.speed, t.pos_x, t.pos_y, t.pos_z)):
+                    live_ok = False
+                    break
+                max_spd = max(max_spd, t.speed)
+                max_gas = max(max_gas, t.gas)
+                n += 1
+                time.sleep(0.05)
+            control_gamepad(pad, [0.0, 0.0, 0.0])
+            t1 = client.latest()
+            dist = math.dist((t1.pos_x, t1.pos_y, t1.pos_z), start)
+            passed = live_ok and n > 30 and dist > 1.0
+            ok += passed
+            print(f"[{ep}] {'PASS' if passed else 'FAIL'}: reset_moved={reset_moved:.1f}m gas_seen={max_gas:.2f} max_speed={max_spd:.1f} moved={dist:.1f}m steps={n} live_ok={live_ok}", flush=True)
+        print(f"Environment: {ok}/{episodes} live episodes OK.", flush=True)
+        return 0 if ok == episodes else 1
+    finally:
+        try:
+            control_gamepad(pad, [0.0, 0.0, 0.0])
+        except Exception:  # noqa: BLE001
+            pass
+        client.close()
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -296,12 +382,16 @@ def main(argv=None) -> int:
     sub.add_parser("controls")
     r = sub.add_parser("reset")
     r.add_argument("--cycles", type=int, default=5)
+    e = sub.add_parser("environment")
+    e.add_argument("--episodes", type=int, default=10)
     a = p.parse_args(argv)
     if a.cmd == "telemetry":
         read_packets(a.host, a.port, a.seconds)
         return 0
     if a.cmd == "reset":
         return cmd_reset(a.cycles)
+    if a.cmd == "environment":
+        return cmd_environment(a.episodes)
     return cmd_controls()
 
 
