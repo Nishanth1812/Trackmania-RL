@@ -154,6 +154,138 @@ def cmd_controls() -> int:
         print("Controls neutralized.", flush=True)
 
 
+def cmd_reset(cycles: int) -> int:
+    import vgamepad
+    from tmrl.custom.tm.utils.control_gamepad import (
+        control_gamepad,
+        gamepad_close_finish_pop_up_tm20,
+        gamepad_reset,
+    )
+
+    try:
+        from tmrl.custom.tm.utils.control_keyboard import keyres as keyboard_reset
+    except Exception:  # noqa: BLE001
+        keyboard_reset = None
+
+    try:
+        sock = socket.create_connection(("127.0.0.1", 9000), timeout=5)
+    except OSError as e:
+        print(f"No telemetry on 9000 ({e}). Reload TMRL_GrabData, then retry.", flush=True)
+        return 2
+    sock.settimeout(0.01)
+    pad = vgamepad.VX360Gamepad()
+    buf = bytearray()
+
+    def drain_latest():
+        nonlocal buf
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+        except (BlockingIOError, TimeoutError, socket.timeout):
+            pass
+        latest = None
+        while len(buf) >= PACKET.size:
+            latest = PACKET.unpack(buf[: PACKET.size])
+            del buf[: PACKET.size]
+        return latest
+
+    def fresh_sample():
+        # Block briefly for one fresh packet.
+        end = time.monotonic() + 2.0
+        while time.monotonic() < end:
+            v = drain_latest()
+            if v is not None:
+                return v
+            control_gamepad(pad, [0.0, 0.0, 0.0])
+            time.sleep(0.05)
+        return None
+
+    def drive_away(seconds=2.5):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            control_gamepad(pad, [0.8, 0.0, 0.0])
+            drain_latest()
+            time.sleep(0.05)
+
+    def do_reset_b():
+        gamepad_close_finish_pop_up_tm20(pad)
+        time.sleep(0.3)
+        gamepad_reset(pad)
+        time.sleep(0.3)
+        control_gamepad(pad, [0.0, 0.0, 0.0])
+
+    def do_reset_del():
+        if keyboard_reset is None:
+            return False
+        gamepad_close_finish_pop_up_tm20(pad)
+        time.sleep(0.3)
+        keyboard_reset()
+        time.sleep(0.3)
+        return True
+
+    for i in (5, 4, 3, 2, 1):
+        print(f"Focus Trackmania now... {i}", flush=True)
+        time.sleep(1)
+
+    ok = 0
+    spawn = None
+    try:
+        for cycle in range(1, cycles + 1):
+            v = fresh_sample()
+            if v is None:
+                print(f"[{cycle}] FAIL: no telemetry", flush=True)
+                continue
+            if spawn is None:
+                spawn = (v[2], v[3], v[4])
+                print(f"Spawn ref {tuple(round(x,1) for x in spawn)} speed={v[0]:.2f}", flush=True)
+            print(f"[{cycle}] driving away...", flush=True)
+            drive_away()
+            away = fresh_sample()
+            if away is not None:
+                import math
+
+                d = math.dist((away[2], away[3], away[4]), spawn)
+                print(f"[{cycle}] away +{d:.1f}m, resetting with B...", flush=True)
+            do_reset_b()
+            time.sleep(2.0)  # countdown guess; tuned after measurement
+            v = fresh_sample()
+            if v is None:
+                print(f"[{cycle}] FAIL: no packet after reset", flush=True)
+                continue
+            import math
+
+            d = math.dist((v[2], v[3], v[4]), spawn)
+            finished = v[8]
+            passed = d <= 2.0 and v[0] < 0.5 and finished == 0
+            print(
+                f"[{cycle}] after B: d={d:.2f}m speed={v[0]:.2f} finish={finished:.0f} "
+                f"-> {'PASS' if passed else 'CHECKPOINT-RESPAWN?'}",
+                flush=True,
+            )
+            if not passed and keyboard_reset is not None:
+                print(f"[{cycle}] B failed, trying keyboard Delete...", flush=True)
+                do_reset_del()
+                time.sleep(2.0)
+                v = fresh_sample()
+                if v is not None:
+                    d = math.dist((v[2], v[3], v[4]), spawn)
+                    passed = d <= 2.0 and v[0] < 0.5 and v[8] == 0
+                    print(f"[{cycle}] after Del: d={d:.2f}m -> {'PASS' if passed else 'FAIL'}", flush=True)
+            if passed:
+                ok += 1
+        print(f"Reset: {ok}/{cycles} returned to spawn (<=2m, speed<0.5, finish cleared).", flush=True)
+        return 0 if ok == cycles else 1
+    finally:
+        try:
+            control_gamepad(pad, [0.0, 0.0, 0.0])
+        except Exception:  # noqa: BLE001
+            pass
+        sock.close()
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -162,10 +294,14 @@ def main(argv=None) -> int:
     t.add_argument("--host", default="127.0.0.1")
     t.add_argument("--port", type=int, default=9000)
     sub.add_parser("controls")
+    r = sub.add_parser("reset")
+    r.add_argument("--cycles", type=int, default=5)
     a = p.parse_args(argv)
     if a.cmd == "telemetry":
         read_packets(a.host, a.port, a.seconds)
         return 0
+    if a.cmd == "reset":
+        return cmd_reset(a.cycles)
     return cmd_controls()
 
 
