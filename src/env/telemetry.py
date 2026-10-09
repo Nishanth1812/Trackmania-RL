@@ -35,6 +35,38 @@ class TelemetryError(RuntimeError):
     pass
 
 
+class SequenceTelemetry:
+    """Offline telemetry source: yields a fixed list of Telemetry samples, one per ``latest()`` call.
+
+    Used by scripts/replay_raw_lap.py and tests. ``received_monotonic`` on each sample is the
+    sample's own timestamp, so the interface's finite-difference velocity and dt are exercised
+    exactly as in live use. Exhaustion raises TelemetryError.
+    """
+
+    reconnects = 0
+
+    def __init__(self, samples):
+        self._samples = list(samples)
+        self._i = 0
+
+    @property
+    def remaining(self) -> int:
+        return len(self._samples) - self._i
+
+    def latest(self, max_age_s: float = 0.25) -> Telemetry:
+        if self._i >= len(self._samples):
+            raise TelemetryError("sequence exhausted")
+        t = self._samples[self._i]
+        self._i += 1
+        return t
+
+    def arrival_times(self):
+        return []
+
+    def close(self):
+        pass
+
+
 class TelemetryClient:
     def __init__(self, host="127.0.0.1", port=9000, reconnect_delay=0.5, max_reconnects=10,
                  stale_reconnect_s=1.0, record_arrivals=False):

@@ -22,7 +22,13 @@ from tmrl.util import partial
 
 from src.env.interface import ACTION_DIM, OBS_DIM, TelemetryInterface
 from src.env.telemetry import TelemetryError
-from src.reward.route import SMOKE_NO_ROUTE
+from src.reward.route import (
+    SMOKE_NO_ROUTE,
+    EpisodeFault,
+    RouteIdentityError,
+    reward_identity,
+    verify_route,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HIDDEN_SIZES = (256, 256)
@@ -55,11 +61,27 @@ def _route_path():
     return str((REPO_ROOT / route).resolve())
 
 
+def _production_route_sha():
+    """Refuse production unless the route file and reward constants match the declared identities."""
+    project = cfg.TMRL_CONFIG["PROJECT"]
+    expected = project.get("route_sha256")
+    if not expected:
+        raise RouteIdentityError("production run needs PROJECT.route_sha256 declared in configs/common.json")
+    verify_route(_route_path(), expected)  # raises RouteIdentityError on mismatch
+    declared_reward = project.get("reward_sha256")
+    if declared_reward != reward_identity():
+        raise RouteIdentityError(
+            f"PROJECT.reward_sha256 {declared_reward} does not match reward_identity() {reward_identity()}"
+        )
+    return expected
+
+
 def rtgym_config():
     smoke = cfg.TMRL_CONFIG["PROJECT"]["route_path"] == SMOKE_NO_ROUTE
+    route_sha = None if smoke else _production_route_sha()
     return {
         "interface": TelemetryInterface,
-        "interface_kwargs": {"smoke": smoke, "route_path": _route_path()},
+        "interface_kwargs": {"smoke": smoke, "route_path": _route_path(), "route_sha256": route_sha},
         "time_step_duration": 0.05,
         "start_obs_capture": 0.05,
         "time_step_timeout_factor": 1.0,
@@ -194,8 +216,8 @@ def run_worker(worker):
 
         try:
             worker.collect_train_episode(max_samples=MAX_SAMPLES_PER_EPISODE)
-        except TelemetryError as e:
-            # Drop the whole incomplete episode: never send a partial record stream.
+        except (TelemetryError, EpisodeFault) as e:
+            # Drop the whole incomplete or invalid episode: never send a partial or faulted record stream.
             _neutralize(worker)
             worker.buffer.clear()
             faults += 1

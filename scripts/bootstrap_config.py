@@ -6,17 +6,39 @@ Usage:
 
 Writes the effective ~/TmrlData/config/config.json atomically and a redacted
 copy in logs/<run>/effective_config.json plus a shared manifest.
+
+Production (non-smoke) runs validate the route and reward identities before anything is written:
+the route file sha256 must match PROJECT.route_sha256, the route metadata must agree, and
+PROJECT.reward_sha256 must equal reward_identity(). The manifest is fingerprinted over its full
+body, so any later edit to its identity fields is detected by check_manifest().
 """
 import argparse
 import copy
 import hashlib
+import importlib.metadata as importlib_metadata
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
+
+from src.reward.route import (  # noqa: E402
+    ACTION_NAMES,
+    CONTROL_HZ,
+    FEATURE_NAMES,
+    SMOKE_NO_ROUTE,
+    file_sha256,
+    reward_identity,
+)
+
+DEPENDENCIES = ("tmrl", "rtgym", "gymnasium", "numpy", "torch")
+
+
+class IdentityError(ValueError):
+    pass
 
 
 def deep_merge(base: dict, over: dict) -> dict:
@@ -27,6 +49,97 @@ def deep_merge(base: dict, over: dict) -> dict:
         else:
             out[k] = copy.deepcopy(v)
     return out
+
+
+def route_identity(route_path: str):
+    """sha256 of the route file on disk, or None for the smoke dummy route."""
+    if route_path == SMOKE_NO_ROUTE:
+        return None
+    return file_sha256(str((REPO / route_path).resolve()))
+
+
+def code_revision() -> str:
+    try:
+        rev = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--", "src", "scripts", "configs", "tests"],
+            cwd=REPO, capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        return rev + ("+dirty" if dirty else "")
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def dependency_versions() -> dict:
+    out = {}
+    for name in DEPENDENCIES:
+        try:
+            out[name] = importlib_metadata.version(name)
+        except importlib_metadata.PackageNotFoundError:
+            out[name] = "absent"
+    return out
+
+
+def build_identity(project: dict, smoke: bool) -> dict:
+    return {
+        "route_path": project.get("route_path"),
+        "route_sha256": None if smoke else route_identity(project["route_path"]),
+        "reward_sha256": reward_identity(),
+        "feature_names": list(FEATURE_NAMES),
+        "action_order": list(ACTION_NAMES),
+        "control_period_s": 1.0 / CONTROL_HZ,
+        "code_revision": code_revision(),
+        "dependency_versions": dependency_versions(),
+    }
+
+
+def fingerprint(body: dict) -> str:
+    payload = {k: v for k, v in body.items() if k != "fingerprint"}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def build_manifest(project: dict, smoke: bool) -> dict:
+    body = {
+        "observation_schema": project.get("observation_schema"),
+        "hidden_sizes": project.get("hidden_sizes"),
+        "smoke": smoke,
+        **build_identity(project, smoke),
+    }
+    body["fingerprint"] = fingerprint(body)
+    return body
+
+
+def check_manifest(manifest: dict) -> None:
+    """Reject a manifest whose fingerprint does not match its contents."""
+    if manifest.get("fingerprint") != fingerprint(manifest):
+        raise IdentityError("manifest fingerprint does not match its contents; manifest rejected")
+
+
+def validate_identity(project: dict, smoke: bool) -> None:
+    """Production gate: declared route and reward identities must match the files and code."""
+    if smoke:
+        return
+    route_path = project.get("route_path")
+    if not route_path or route_path == SMOKE_NO_ROUTE:
+        raise IdentityError("production run must use a real route, not the smoke dummy route")
+    declared = project.get("route_sha256")
+    if not declared:
+        raise IdentityError("production run needs PROJECT.route_sha256 declared")
+    actual = route_identity(route_path)
+    if actual != declared:
+        raise IdentityError(f"route file sha256 {actual} does not match declared {declared}")
+    meta_path = (REPO / route_path).parent / "metadata.json"
+    if not meta_path.exists():
+        raise IdentityError(f"missing route metadata {meta_path}")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if meta.get("route_sha256") != declared:
+        raise IdentityError("route metadata route_sha256 does not match the declared route")
+    if project.get("reward_sha256") != reward_identity():
+        raise IdentityError(
+            f"PROJECT.reward_sha256 {project.get('reward_sha256')} does not match reward_identity() {reward_identity()}"
+        )
 
 
 def main(argv=None) -> int:
@@ -68,7 +181,7 @@ def main(argv=None) -> int:
         eff["RUN_NAME"] = "pipeline_smoke"
         eff["ENVIRONMENT_STEPS_BEFORE_TRAINING"] = 64
         eff["UPDATE_MODEL_INTERVAL"] = 1
-        eff.setdefault("PROJECT", {})["route_path"] = "smoke-no-route"
+        eff.setdefault("PROJECT", {})["route_path"] = SMOKE_NO_ROUTE
 
     # Validation.
     ports = [eff.get("PORT"), eff.get("LOCAL_PORT_SERVER"), eff.get("LOCAL_PORT_TRAINER"), eff.get("LOCAL_PORT_WORKER")]
@@ -79,16 +192,18 @@ def main(argv=None) -> int:
     if a.profile in ("windows", "modal"):
         assert eff.get("TLS") is True
 
+    project = eff.get("PROJECT", {})
+    try:
+        validate_identity(project, a.smoke)
+        manifest = build_manifest(project, a.smoke)
+        check_manifest(manifest)
+    except IdentityError as e:
+        print(f"identity check failed: {e}", flush=True)
+        return 2
+
     run = eff["RUN_NAME"]
     logdir = REPO / "logs" / run
     logdir.mkdir(parents=True, exist_ok=True)
-    manifest = {
-        "observation_schema": eff.get("PROJECT", {}).get("observation_schema"),
-        "hidden_sizes": eff.get("PROJECT", {}).get("hidden_sizes"),
-        "route_path": eff.get("PROJECT", {}).get("route_path"),
-        "smoke": a.smoke,
-    }
-    manifest["fingerprint"] = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()[:16]
     (logdir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
     tmp = tmrl_cfg.with_suffix(".tmp")

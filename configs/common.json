@@ -41,6 +41,8 @@
     "hidden_sizes": [256, 256],
     "seed": 0,
     "route_path": "tracks/v1/route.npz",
+    "route_sha256": "7e7e94aa7fc35bb07ca4e06f976e4759009f4dcdd9882c73a90e084e5bb1c1d0",
+    "reward_sha256": "5d217317629ffc19e0fa2dc01d8c90ccf65e19ecd3c4f3e232f61b18b45a33b7",
     "telemetry_max_age_s": 0.25,
     "reset_timeout_s": 10,
     "reset_attempts": 3,
