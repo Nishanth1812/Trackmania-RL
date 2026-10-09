@@ -82,8 +82,12 @@ def cmd_controls() -> int:
     sock.settimeout(0.01)
 
     def hold(action, seconds: float, label: str):
-        """Refresh `action` at 20 Hz; sample telemetry DURING the hold."""
+        """Refresh `action` at 20 Hz; sample telemetry DURING the hold.
+
+        Returns (min_steer, max_gas, max_brake, max_speed) peaks seen.
+        """
         buf = bytearray()
+        min_steer = 0.0
         max_steer = 0.0
         max_gas = 0.0
         max_brake = 0.0
@@ -107,7 +111,8 @@ def cmd_controls() -> int:
                 if v0 is None:
                     v0 = v
                 vlast = v
-                max_steer = v[IDX_STEER]
+                min_steer = min(min_steer, v[IDX_STEER])
+                max_steer = max(max_steer, v[IDX_STEER])
                 max_gas = max(max_gas, v[IDX_GAS])
                 max_brake = max(max_brake, v[IDX_BRAKE])
                 max_speed = max(max_speed, v[IDX_SPEED])
@@ -117,11 +122,11 @@ def cmd_controls() -> int:
             dist = f"dx={vlast[2]-v0[2]:.1f} dz={vlast[4]-v0[4]:.1f}"
         print(
             f"{label}: cmd gas={action[0]:+.1f} brake={action[1]:+.1f} steer={action[2]:+.1f} "
-            f"-> tel steer={max_steer:+.2f} gasmax={max_gas:.2f} brakemax={max_brake:.0f} "
+            f"-> tel steer=[{min_steer:+.2f},{max_steer:+.2f}] gasmax={max_gas:.2f} brakemax={max_brake:.0f} "
             f"spdmax={max_speed:.1f} {dist}",
             flush=True,
         )
-        return vlast
+        return min_steer, max_steer, max_gas, max_brake, max_speed
 
     pad = vgamepad.VX360Gamepad()
     for i in range(_COUNTDOWN, 0, -1):
@@ -131,15 +136,31 @@ def cmd_controls() -> int:
         "Controls test: keep Trackmania focused, car on track, hands off other inputs.",
         flush=True,
     )
-    print("Sequence: throttle 2s -> neutral -> steer left -> steer right -> brake tap.", flush=True)
+    print("Sequence: full throttle 2s -> neutral -> steer left -> steer right -> brake tap.", flush=True)
+    print("NOTE: partial gas (~0.6) reads as 0.00 in telemetry (trigger deadzone);", flush=True)
+    print("full deflection is required for the gas check.", flush=True)
     try:
         hold([0.0, 0.0, 0.0], 0.5, "neutral0")
-        hold([0.6, 0.0, 0.0], 2.0, "throttle")
+        _, _, gas_thr, _, spd_thr = hold([1.0, 0.0, 0.0], 2.0, "throttle")
         hold([0.0, 0.0, 0.0], 0.5, "coast")
-        hold([0.3, 0.0, -0.7], 1.5, "steer-left")
-        hold([0.3, 0.0, 0.7], 1.5, "steer-right")
-        hold([0.0, 0.8, 0.0], 1.0, "brake")
-        print("PASS: inputs sent; check that telemetry steer/gas/brake tracked commands.", flush=True)
+        smin_l, _, gas_l, _, _ = hold([1.0, 0.0, -1.0], 1.5, "steer-left")
+        _, smax_r, gas_r, _, _ = hold([1.0, 0.0, 1.0], 1.5, "steer-right")
+        _, _, _, brake_max, _ = hold([0.0, 1.0, 0.0], 1.0, "brake")
+        fails = []
+        if gas_thr < 0.5:
+            fails.append(f"throttle gasmax={gas_thr:.2f} (<0.5)")
+        if spd_thr < 5.0:
+            fails.append(f"throttle spdmax={spd_thr:.1f} (<5: car did not move)")
+        if smin_l > -0.5:
+            fails.append(f"steer-left min={smin_l:+.2f} (>-0.5)")
+        if smax_r < 0.5:
+            fails.append(f"steer-right max={smax_r:+.2f} (<+0.5)")
+        if brake_max < 0.5:
+            fails.append("brake flag never set")
+        if fails:
+            print("FAIL: " + "; ".join(fails), flush=True)
+            return 1
+        print("PASS: gas/steer-left/steer-right/brake all tracked in telemetry.", flush=True)
         return 0
     except KeyboardInterrupt:
         print("Interrupted by user.", flush=True)
@@ -330,13 +351,38 @@ def cmd_environment(episodes: int) -> int:
     try:
         for ep in range(1, episodes + 1):
             control_gamepad(pad, [0.0, 0.0, 0.0])
-            pre = client.latest()
-            gamepad_reset(pad)
-            time.sleep(2.0)
             try:
-                t0 = client.latest()
+                pre = client.latest()
             except TelemetryError as e:
-                print(f"[{ep}] FAIL: {e}", flush=True)
+                print(f"[{ep}] FAIL: pre-reset {e}", flush=True)
+                continue
+            gamepad_reset(pad)
+            # Post-reset re-sync: map reload/countdown can stall the stream for a
+            # bit; the 250 ms freshness rule applies DURING control, not across
+            # a reset boundary (PLAN reset_timeout_s = 10 s).
+            t0 = None
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                control_gamepad(pad, [0.0, 0.0, 0.0])
+                try:
+                    t0 = client.latest()
+                    break
+                except TelemetryError:
+                    time.sleep(0.1)
+            if t0 is None:
+                print(f"[{ep}] FAIL: no fresh telemetry within 10 s of reset", flush=True)
+                continue
+            # Require the stream to be settled (3 fresh reads in a row) before driving.
+            settled = True
+            for _ in range(3):
+                time.sleep(0.1)
+                try:
+                    client.latest()
+                except TelemetryError:
+                    settled = False
+                    break
+            if not settled:
+                print(f"[{ep}] FAIL: stream unsettled after reset", flush=True)
                 continue
             reset_moved = math.dist((t0.pos_x, t0.pos_y, t0.pos_z), (pre.pos_x, pre.pos_y, pre.pos_z))
             start, max_spd, max_gas, n = (t0.pos_x, t0.pos_y, t0.pos_z), 0.0, 0.0, 0
@@ -357,7 +403,11 @@ def cmd_environment(episodes: int) -> int:
                 n += 1
                 time.sleep(0.05)
             control_gamepad(pad, [0.0, 0.0, 0.0])
-            t1 = client.latest()
+            try:
+                t1 = client.latest()
+            except TelemetryError:
+                print(f"[{ep}] FAIL: stream died at episode end (live_ok={live_ok} steps={n})", flush=True)
+                continue
             dist = math.dist((t1.pos_x, t1.pos_y, t1.pos_z), start)
             passed = live_ok and n > 30 and dist > 1.0
             ok += passed
