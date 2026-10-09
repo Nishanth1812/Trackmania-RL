@@ -36,14 +36,21 @@ class TelemetryError(RuntimeError):
 
 
 class TelemetryClient:
-    def __init__(self, host="127.0.0.1", port=9000, reconnect_delay=0.5, max_reconnects=10):
+    def __init__(self, host="127.0.0.1", port=9000, reconnect_delay=0.5, max_reconnects=10,
+                 stale_reconnect_s=1.0):
         self._host = host
         self._port = port
         self._reconnect_delay = reconnect_delay
         self._max_reconnects = max_reconnects
+        # Silence on an open socket (no EOF/RST, just no packets) also triggers a
+        # reconnect: the plugin sometimes stops sending on a live connection and only
+        # serves fresh ones. This must stay well above the 0.25 s control freshness
+        # gate so normal jitter never causes a reconnect.
+        self._stale_reconnect_s = stale_reconnect_s
         self._lock = threading.Lock()
         self._latest: Telemetry | None = None
         self._seq = 0
+        self._reconnects = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -67,11 +74,14 @@ class TelemetryClient:
                 continue
             buf = bytearray()
             sock.settimeout(1.0)
+            last_data = time.monotonic()
             try:
                 while not self._stop.is_set():
                     try:
                         chunk = sock.recv(4096)
                     except socket.timeout:
+                        if time.monotonic() - last_data > self._stale_reconnect_s:
+                            break  # silent stall on an open socket: fresh connection only
                         continue
                     except OSError:
                         break  # RST / abort: reconnect below, do not kill the thread
@@ -85,6 +95,7 @@ class TelemetryClient:
                             values = PACKET.unpack(raw)
                         except struct.error:
                             continue
+                        last_data = time.monotonic()
                         if any(not math.isfinite(x) for x in values):
                             continue
                         with self._lock:
@@ -95,9 +106,16 @@ class TelemetryClient:
                     sock.close()
                 except OSError:
                     pass
+                with self._lock:
+                    self._reconnects += 1
                 buf = bytearray()  # reset accumulation on reconnect
                 if not self._stop.is_set():
                     time.sleep(self._reconnect_delay)
+
+    @property
+    def reconnects(self) -> int:
+        with self._lock:
+            return self._reconnects
 
     def latest(self, max_age_s: float = 0.25) -> Telemetry:
         with self._lock:

@@ -101,6 +101,48 @@ def check_reconnect() -> None:
     print("self_check: EOF reconnect OK", flush=True)
 
 
+def check_stall_reconnect() -> None:
+    """Server accepts but goes silent: the client must reconnect on its own."""
+    vals = (10.0, 50.0, 7.0, 8.0, 9.0, 0.0, 1.0, 0.0, 0.0, 3.0, 5000.0)
+    raw = PACKET.pack(*vals)
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(2)
+    srv.settimeout(5.0)
+    port = srv.getsockname()[1]
+
+    def serve():
+        conn, _ = srv.accept()  # first connection: silence, never a byte
+        time.sleep(2.0)
+        conn.close()
+        conn2, _ = srv.accept()  # reconnected client gets data here
+        with conn2:
+            for _ in range(3):
+                conn2.sendall(raw)
+                time.sleep(0.02)
+        srv.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    client = TelemetryClient(port=port, reconnect_delay=0.05, max_reconnects=20,
+                             stale_reconnect_s=0.5)
+    try:
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            try:
+                if client.latest(max_age_s=1.0).seq >= 1:
+                    break
+            except Exception:  # noqa: BLE001
+                pass
+        last = client.latest(max_age_s=1.0)
+        assert last.seq >= 1, "client never recovered from a silent stall"
+        assert client.reconnects >= 1, "silent stall did not trigger a reconnect"
+    finally:
+        client.close()
+    print("self_check: stall reconnect OK", flush=True)
+
+
 def check_actions_and_spaces() -> None:
     from src.env.interface import ACTION_DIM, OBS_DIM, TelemetryInterface
 
@@ -190,6 +232,7 @@ def check_projection() -> None:
 def main() -> int:
     check_packets()
     check_reconnect()
+    check_stall_reconnect()
     check_actions_and_spaces()
     check_reward()
     check_projection()
