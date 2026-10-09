@@ -1,0 +1,35 @@
+{
+  "track": "unknown",
+  "total_length_m": 1291.3353868394145,
+  "point_count": 1292,
+  "spacing_m": 1.0002597884116302,
+  "spawn_xyz": [
+    1840.0,
+    18.001501083374023,
+    1136.0
+  ],
+  "finish_xyz": [
+    1741.61328125,
+    56.01922607421875,
+    725.0478515625
+  ],
+  "lap_time_s": 42.53100000001723,
+  "speed_ratio_position_to_packet": 0.9668524281841765,
+  "discarded_attempts": 1,
+  "packets_missed_between_polls": 260,
+  "recorded_utc": "2026-10-09T17:08:49+00:00",
+  "git_revision": "f8afbf9",
+  "raw_recording": "raw/raw_20261009T170848Z.npz",
+  "route_sha256": "7e7e94aa7fc35bb07ca4e06f976e4759009f4dcdd9882c73a90e084e5bb1c1d0",
+  "corridor_limit_m": 10,
+  "finish_radius_m": 10,
+  "rpm_scale_status": "unknown; raw recording has no gear or rpm columns, so the rpm and gear observation features are fed as 0 in offline replay",
+  "countdown_notes": "The raw recording's first sample is stationary (speed 0.0). The pre-start countdown is not characterised by this recording; no countdown timing is assumed.",
+  "speed_conversion_notes": "Packet speed is used as m/s without conversion. Recorded position-to-packet speed ratio is 0.967. Speed units are assumed, not separately verified against the game UI.",
+  "known_caveats": [
+    "Telemetry gap of 4.985 s between raw samples 0 and 1 (dt 4.985 s). Cause: the user switched windows away from the game during the recording, so packets stopped arriving. Measured: speed 0.0 before the gap, 3D position change 0.0737 m across it (0.0728 m horizontal), route progress change 0.0728 m. The car was effectively stationary at spawn, so the gap does not cut a corner. An earlier claim that about 150 m is interpolated across this gap is not supported by the raw data and is withdrawn. The user chose not to re-record. The route is not fully verified over this stretch.",
+    "Lap time 42.53 s and length 1291.3 m are slightly above the 20-40 s target in PLAN Phase I.",
+    "Track identity is unknown (no map UID recorded); the recorded route is only valid for the map and spawn it was recorded on.",
+    "Offline replay of the raw lap through the real TelemetryInterface reports no teleport-gate trips and no corridor exceedances. This is an offline replay only; live human-lap verification was NOT done."
+  ]
+}
