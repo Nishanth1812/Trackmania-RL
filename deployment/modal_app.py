@@ -7,6 +7,7 @@ From the repo root (Modal secret `tmrl-secrets` must exist: TMRL_PASSWORD, TLS_C
     .\\.venv\\Scripts\\python.exe -m modal deploy deployment/modal_app.py   # then trainer_service.spawn()
 
 Stop a running trainer with `modal app stop trackmania-rl`; a running L4 bills continuously.
+Each run is capped at MAX_RUN_S (the $5 budget); the workspace spend limit in Modal billing is the total cap.
 """
 import os
 import signal
@@ -24,6 +25,12 @@ TUNNEL_PORT = 55555
 APP_DIR = "/app"
 STATE_DIR = "/state"
 HOSTNAME = "default"  # matches the certificate and TMRL HOSTNAME; the cert is pinned, not the Modal host
+
+# Spend guard: Modal bills L4 at $0.000222/s (~$0.80/h). CPU and memory bill on top, so assume +25%.
+# Modal enforces `timeout` per call, so no single run can cost more than BUDGET_USD even if it hangs.
+BUDGET_USD = 5.0
+L4_USD_PER_S = 0.000222
+MAX_RUN_S = int(BUDGET_USD / (L4_USD_PER_S * 1.25))  # 18018 s, about 5.0 h
 
 app = modal.App(APP_NAME)
 vol = modal.Volume.from_name("tmrl-state", create_if_missing=True)
@@ -242,7 +249,7 @@ def _wait_port(port, timeout=60.0):
 
 @app.function(
     image=image, gpu="L4", volumes={STATE_DIR: vol}, secrets=secrets,
-    timeout=6 * 60 * 60, max_containers=1,
+    timeout=MAX_RUN_S, max_containers=1,
 )
 def trainer_service(run_name: str = "pipeline_smoke", smoke: bool = True):
     """TMRL server + trainer in one container, tunneled on 55555 with TLS and the shared password."""
