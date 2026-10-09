@@ -343,11 +343,17 @@ def cmd_environment(episodes: int) -> int:
     import vgamepad
     from tmrl.custom.tm.utils.control_gamepad import control_gamepad, gamepad_reset
 
+    try:
+        from tmrl.custom.tm.utils.control_keyboard import keyres as keyboard_reset
+    except Exception:  # noqa: BLE001
+        keyboard_reset = None
+
     pad = vgamepad.VX360Gamepad()
     for i in range(_COUNTDOWN, 0, -1):
         print(f"Focus Trackmania now... {i}", flush=True)
         time.sleep(1)
     ok = 0
+    spawn = None  # (x, y, z) post-reset reference, captured at episode 1 like the M3 gate
     try:
         for ep in range(1, episodes + 1):
             control_gamepad(pad, [0.0, 0.0, 0.0])
@@ -384,6 +390,30 @@ def cmd_environment(episodes: int) -> int:
             if not settled:
                 print(f"[{ep}] FAIL: stream unsettled after reset", flush=True)
                 continue
+            if spawn is None:
+                spawn = (t0.pos_x, t0.pos_y, t0.pos_z)
+                print(f"Spawn ref {tuple(round(x, 1) for x in spawn)}", flush=True)
+            else:
+                d0 = math.dist((t0.pos_x, t0.pos_y, t0.pos_z), spawn)
+                fb = ""
+                if (d0 > 2.0 or t0.speed >= 0.5 or t0.finish != 0) and keyboard_reset is not None:
+                    keyboard_reset()
+                    t0b = None
+                    dl = time.monotonic() + 10.0
+                    while time.monotonic() < dl:
+                        control_gamepad(pad, [0.0, 0.0, 0.0])
+                        try:
+                            t0b = client.latest()
+                            break
+                        except TelemetryError:
+                            time.sleep(0.1)
+                    if t0b is not None:
+                        t0 = t0b
+                        d0 = math.dist((t0.pos_x, t0.pos_y, t0.pos_z), spawn)
+                        fb = " (Delete fallback)"
+                if not (d0 <= 2.0 and t0.speed < 0.5 and t0.finish == 0):
+                    print(f"[{ep}] FAIL: reset missed spawn d={d0:.1f}m speed={t0.speed:.1f}{fb}", flush=True)
+                    continue
             reset_moved = math.dist((t0.pos_x, t0.pos_y, t0.pos_z), (pre.pos_x, pre.pos_y, pre.pos_z))
             start, max_spd, max_gas, n = (t0.pos_x, t0.pos_y, t0.pos_z), 0.0, 0.0, 0
             end = time.monotonic() + 3.0
