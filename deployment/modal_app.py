@@ -7,8 +7,9 @@ From the repo root (Modal secret `tmrl-secrets` must exist: TMRL_PASSWORD, TLS_C
     .\\.venv\\Scripts\\python.exe -m modal deploy deployment/modal_app.py   # then trainer_service.spawn()
 
 Stop a running trainer with `modal app stop trackmania-rl`; a running L4 bills continuously.
-Each run is capped at MAX_RUN_S (the $5 budget); the workspace spend limit in Modal billing is the total cap.
+Training spend is capped at BUDGET_USD in total across runs (ledger on the Volume); the workspace limit in Modal billing is a second backstop.
 """
+import json
 import os
 import signal
 import socket
@@ -26,11 +27,23 @@ APP_DIR = "/app"
 STATE_DIR = "/state"
 HOSTNAME = "default"  # matches the certificate and TMRL HOSTNAME; the cert is pinned, not the Modal host
 
-# Spend guard: Modal bills L4 at $0.000222/s (~$0.80/h). CPU and memory bill on top, so assume +25%.
-# Modal enforces `timeout` per call, so no single run can cost more than BUDGET_USD even if it hangs.
+# Spend guard for the whole project. Modal bills the L4 at $0.000222/s (~$0.80/h); CPU and memory
+# bill on top, so COST_FACTOR adds 25%. Every trainer_service run adds its seconds to a ledger on the
+# Volume and stops once the total across all runs reaches BUDGET_USD. MAX_RUN_S is the per-call backstop.
 BUDGET_USD = 5.0
 L4_USD_PER_S = 0.000222
-MAX_RUN_S = int(BUDGET_USD / (L4_USD_PER_S * 1.25))  # 18018 s, about 5.0 h
+COST_FACTOR = 1.25
+MAX_RUN_S = int(BUDGET_USD / (L4_USD_PER_S * COST_FACTOR))  # 18018 s: one run alone cannot exceed the budget
+SPENT_SEED_USD = 1.0  # estimate of spend before the ledger existed (checks M5-M7); replace with the Modal dashboard figure
+LEDGER = Path(STATE_DIR) / "spend.json"
+
+
+def _usd(seconds: float) -> float:
+    return seconds * L4_USD_PER_S * COST_FACTOR
+
+
+def _ledger_seconds() -> float:
+    return json.loads(LEDGER.read_text())["seconds"] if LEDGER.exists() else 0.0
 
 app = modal.App(APP_NAME)
 vol = modal.Volume.from_name("tmrl-state", create_if_missing=True)
@@ -253,6 +266,18 @@ def _wait_port(port, timeout=60.0):
 )
 def trainer_service(run_name: str = "pipeline_smoke", smoke: bool = True):
     """TMRL server + trainer in one container, tunneled on 55555 with TLS and the shared password."""
+    vol.reload()
+    prior_s = _ledger_seconds()
+    spent = SPENT_SEED_USD + _usd(prior_s)
+    if spent >= BUDGET_USD:
+        print(f"budget used up (~${spent:.2f} of ${BUDGET_USD:.2f}); not starting", flush=True)
+        return
+    t_start = time.monotonic()
+
+    def record_spend():
+        LEDGER.write_text(json.dumps({"seconds": prior_s + time.monotonic() - t_start}))
+        vol.commit()
+
     os.chdir(APP_DIR)
     for name in ("weights", "checkpoints"):  # persist under the Volume
         target = Path(STATE_DIR) / name
@@ -281,8 +306,11 @@ def trainer_service(run_name: str = "pipeline_smoke", smoke: bool = True):
             last_commit = time.monotonic()
             while not stop["flag"] and server.poll() is None and trainer.poll() is None:
                 time.sleep(2)
+                if spent + _usd(time.monotonic() - t_start) >= BUDGET_USD:
+                    print("budget reached; stopping the trainer", flush=True)
+                    break
                 if time.monotonic() - last_commit > 60:
-                    vol.commit()
+                    record_spend()
                     last_commit = time.monotonic()
     finally:
         for proc in (trainer, server):
@@ -293,7 +321,7 @@ def trainer_service(run_name: str = "pipeline_smoke", smoke: bool = True):
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        vol.commit()
+        record_spend()
 
 
 @app.local_entrypoint()
