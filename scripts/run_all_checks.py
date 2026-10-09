@@ -63,6 +63,9 @@ def main(argv=None) -> int:
             print(f"[{ms}] {name}: NOT IMPLEMENTED", flush=True)
             continue
         env = dict(os.environ)
+        # Modal's CLI prints Unicode (check marks); a cp1252 Windows console would crash on it.
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         if stage == "live":
             if not counted_down:
                 for i in range(a.countdown, 0, -1):

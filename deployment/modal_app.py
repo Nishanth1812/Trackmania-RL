@@ -38,6 +38,17 @@ SPENT_SEED_USD = 1.0  # estimate of spend before the ledger existed (checks M5-M
 LEDGER = Path(STATE_DIR) / "spend.json"
 
 
+def _local_env() -> dict:
+    """Env for the Windows-side client subprocesses. TMRL_PASSWORD falls back to the gitignored
+    secrets_local/password.txt, the value the Modal secret tmrl-secrets was created from."""
+    env = dict(os.environ)
+    if not env.get("TMRL_PASSWORD"):
+        pw_file = Path(__file__).resolve().parents[1] / "secrets_local" / "password.txt"
+        if pw_file.exists():
+            env["TMRL_PASSWORD"] = pw_file.read_text(encoding="utf-8").strip()
+    return env
+
+
 def _usd(seconds: float) -> float:
     return seconds * L4_USD_PER_S * COST_FACTOR
 
@@ -131,7 +142,7 @@ def echo_check():
             [sys.executable, str(root / "scripts" / "smoke_pipeline.py"), "echo-client",
              "--host", addr["host"], "--port", str(addr["port"]),
              "--cert", str(root / "secrets_local" / "certificate.pem")],
-            cwd=root,
+            cwd=root, env=_local_env(),
         ).returncode
     finally:
         call.cancel()
@@ -353,9 +364,10 @@ def roundtrip_check():
             [py, "scripts/bootstrap_config.py", "--profile", "windows", "--server", addr["host"],
              "--port", str(addr["port"]), "--run-name", "pipeline_smoke", "--smoke",
              "--tls-dir", str(root / "secrets_local")],
-            cwd=root, check=True,
+            cwd=root, check=True, env=_local_env(),
         )
-        rc = subprocess.run([py, "scripts/smoke_pipeline.py", "remote", "--updates", "10"], cwd=root).returncode
+        rc = subprocess.run([py, "scripts/smoke_pipeline.py", "remote", "--updates", "10"], cwd=root,
+                            env=_local_env()).returncode
     finally:
         if backup.exists():
             shutil.move(str(backup), str(cfg_path))

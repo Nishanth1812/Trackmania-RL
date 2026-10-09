@@ -37,7 +37,7 @@ class TelemetryError(RuntimeError):
 
 class TelemetryClient:
     def __init__(self, host="127.0.0.1", port=9000, reconnect_delay=0.5, max_reconnects=10,
-                 stale_reconnect_s=1.0):
+                 stale_reconnect_s=1.0, record_arrivals=False):
         self._host = host
         self._port = port
         self._reconnect_delay = reconnect_delay
@@ -51,6 +51,8 @@ class TelemetryClient:
         self._latest: Telemetry | None = None
         self._seq = 0
         self._reconnects = 0
+        # Opt-in diagnostics: monotonic arrival time of every accepted packet.
+        self._arrivals: list[float] | None = [] if record_arrivals else None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -98,9 +100,12 @@ class TelemetryClient:
                         last_data = time.monotonic()
                         if any(not math.isfinite(x) for x in values):
                             continue
+                        now = time.monotonic()
                         with self._lock:
                             self._seq += 1
-                            self._latest = Telemetry(*values, seq=self._seq, received_monotonic=time.monotonic())
+                            self._latest = Telemetry(*values, seq=self._seq, received_monotonic=now)
+                            if self._arrivals is not None:
+                                self._arrivals.append(now)
             finally:
                 try:
                     sock.close()
@@ -116,6 +121,11 @@ class TelemetryClient:
     def reconnects(self) -> int:
         with self._lock:
             return self._reconnects
+
+    def arrival_times(self) -> list[float]:
+        """Copy of packet arrival times (empty unless record_arrivals=True)."""
+        with self._lock:
+            return list(self._arrivals or [])
 
     def latest(self, max_age_s: float = 0.25) -> Telemetry:
         with self._lock:

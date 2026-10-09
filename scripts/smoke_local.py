@@ -314,6 +314,42 @@ def cmd_reset(cycles: int) -> int:
         sock.close()
 
 
+GAP_THRESHOLDS_S = (0.1, 0.25, 1.0)
+
+
+def report_gaps(arrivals: list, marks: list, reconnects: int) -> None:
+    """Print inter-packet gap statistics and which test phase each large gap started in.
+
+    `marks` is a list of (monotonic_time, label); a gap is attributed to the last mark
+    before it started, so "ep3 reset-cmd" means the gap began while waiting for reset.
+    """
+    arrivals = sorted(arrivals)
+    gaps = [(b - a, a) for a, b in zip(arrivals, arrivals[1:])]
+    print(f"GAPDBG packets={len(arrivals)} reconnects={reconnects}", flush=True)
+    if not gaps:
+        print("GAPDBG no gaps recorded", flush=True)
+        return
+    worst_gap, worst_at = max(gaps)
+    counts = {t: sum(1 for g, _ in gaps if g > t) for t in GAP_THRESHOLDS_S}
+    print(
+        f"GAPDBG max_gap={worst_gap * 1000:.0f}ms "
+        + " ".join(f">{int(t * 1000)}ms={counts[t]}" for t in GAP_THRESHOLDS_S),
+        flush=True,
+    )
+    marks = sorted(marks)
+    by_phase: dict[str, int] = {}
+    for gap, start in sorted(gaps, reverse=True):
+        if gap <= GAP_THRESHOLDS_S[1]:
+            break
+        before = [m for m in marks if m[0] <= start]
+        label, since = (before[-1][1], start - before[-1][0]) if before else ("(none)", 0.0)
+        until = (start + gap - before[-1][0]) if before else 0.0
+        phase = label.split(" ", 1)[1] if " " in label else label
+        by_phase[phase] = by_phase.get(phase, 0) + 1
+        print(f"GAPDBG gap={gap * 1000:.0f}ms phase='{label}' +{since:.2f}s..+{until:.2f}s", flush=True)
+    print(f"GAPDBG gaps>250ms by phase: {by_phase or 'none'}", flush=True)
+
+
 def cmd_environment(episodes: int) -> int:
     import math
 
@@ -335,8 +371,16 @@ def cmd_environment(episodes: int) -> int:
     print("offline contract: spaces (15,)+(3,) float32, default action, reset/step shapes OK", flush=True)
 
     # Part 2: live episodes against the game.
+    # SMOKE_GAP_DEBUG=1 records packet arrival times and phase marks (diagnostic only).
+    gap_debug = os.environ.get("SMOKE_GAP_DEBUG") == "1"
+    marks: list[tuple[float, str]] = []
+
+    def mark(label: str) -> None:
+        if gap_debug:
+            marks.append((time.monotonic(), label))
+
     try:
-        client = TelemetryClient()
+        client = TelemetryClient(record_arrivals=gap_debug)
     except Exception as e:  # noqa: BLE001
         print(f"No telemetry on 9000 ({e}). Reload TMRL_GrabData, then retry.", flush=True)
         return 2
@@ -356,12 +400,24 @@ def cmd_environment(episodes: int) -> int:
     spawn = None  # (x, y, z) post-reset reference, captured at episode 1 like the M3 gate
     try:
         for ep in range(1, episodes + 1):
-            control_gamepad(pad, [0.0, 0.0, 0.0])
-            try:
-                pre = client.latest()
-            except TelemetryError as e:
-                print(f"[{ep}] FAIL: pre-reset {e}", flush=True)
+            # Pre-reset freshness: after a stream stall in the previous episode the client
+            # needs its reconnect (1-2 s stall detection + 0.5 s delay) before data resumes,
+            # so wait a bounded time instead of failing the next episode instantly.
+            mark(f"ep{ep} pre-reset-check")
+            pre, pre_err = None, None
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                control_gamepad(pad, [0.0, 0.0, 0.0])
+                try:
+                    pre = client.latest()
+                    break
+                except TelemetryError as e:
+                    pre_err = e
+                    time.sleep(0.1)
+            if pre is None:
+                print(f"[{ep}] FAIL: pre-reset {pre_err} (reconnects={client.reconnects})", flush=True)
                 continue
+            mark(f"ep{ep} reset-wait")
             gamepad_reset(pad)
             # Post-reset re-sync: map reload/countdown can stall the stream for a
             # bit; the 250 ms freshness rule applies DURING control, not across
@@ -378,15 +434,23 @@ def cmd_environment(episodes: int) -> int:
             if t0 is None:
                 print(f"[{ep}] FAIL: no fresh telemetry within 10 s of reset", flush=True)
                 continue
-            # Require the stream to be settled (3 fresh reads in a row) before driving.
-            settled = True
-            for _ in range(3):
-                time.sleep(0.1)
-                try:
-                    client.latest()
-                except TelemetryError:
-                    settled = False
-                    break
+            mark(f"ep{ep} settle")
+            # The plugin can pause the stream for a few hundred ms around the map reset
+            # (see GAPDBG). That pause is expected at this boundary, so wait (bounded by
+            # 10 s, PLAN reset_timeout_s) until 3 consecutive reads 0.1 s apart pass the
+            # normal 250 ms freshness gate. The gate itself is unchanged.
+            settled = False
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not settled:
+                run = 0
+                while run < 3:
+                    time.sleep(0.1)
+                    try:
+                        client.latest()
+                    except TelemetryError:
+                        break
+                    run += 1
+                settled = run == 3
             if not settled:
                 print(f"[{ep}] FAIL: stream unsettled after reset", flush=True)
                 continue
@@ -397,6 +461,7 @@ def cmd_environment(episodes: int) -> int:
                 d0 = math.dist((t0.pos_x, t0.pos_y, t0.pos_z), spawn)
                 fb = ""
                 if (d0 > 2.0 or t0.speed >= 0.5 or t0.finish != 0) and keyboard_reset is not None:
+                    mark(f"ep{ep} kb-fallback")
                     keyboard_reset()
                     t0b = None
                     dl = time.monotonic() + 10.0
@@ -416,6 +481,7 @@ def cmd_environment(episodes: int) -> int:
                     continue
             reset_moved = math.dist((t0.pos_x, t0.pos_y, t0.pos_z), (pre.pos_x, pre.pos_y, pre.pos_z))
             start, max_spd, max_gas, n = (t0.pos_x, t0.pos_y, t0.pos_z), 0.0, 0.0, 0
+            mark(f"ep{ep} drive")
             end = time.monotonic() + 3.0
             live_ok = True
             while time.monotonic() < end:
@@ -423,6 +489,7 @@ def cmd_environment(episodes: int) -> int:
                 try:
                     t = client.latest()
                 except TelemetryError:
+                    mark(f"ep{ep} drive-stale")
                     live_ok = False
                     break
                 if not all(math.isfinite(x) for x in (t.speed, t.pos_x, t.pos_y, t.pos_z)):
@@ -433,10 +500,11 @@ def cmd_environment(episodes: int) -> int:
                 n += 1
                 time.sleep(0.05)
             control_gamepad(pad, [0.0, 0.0, 0.0])
+            mark(f"ep{ep} episode-end")
             try:
                 t1 = client.latest()
             except TelemetryError:
-                print(f"[{ep}] FAIL: stream died at episode end (live_ok={live_ok} steps={n})", flush=True)
+                print(f"[{ep}] FAIL: stream died at episode end (live_ok={live_ok} steps={n} reconnects={client.reconnects})", flush=True)
                 continue
             dist = math.dist((t1.pos_x, t1.pos_y, t1.pos_z), start)
             # ~100 ms per loop iteration (pad update + sleep granularity), so ~30
@@ -451,6 +519,8 @@ def cmd_environment(episodes: int) -> int:
             control_gamepad(pad, [0.0, 0.0, 0.0])
         except Exception:  # noqa: BLE001
             pass
+        if gap_debug:
+            report_gaps(client.arrival_times(), marks, client.reconnects)
         client.close()
 
 
