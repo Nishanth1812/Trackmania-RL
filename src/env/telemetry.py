@@ -73,6 +73,8 @@ class TelemetryClient:
                         chunk = sock.recv(4096)
                     except socket.timeout:
                         continue
+                    except OSError:
+                        break  # RST / abort: reconnect below, do not kill the thread
                     if chunk == b"":
                         break  # EOF: reconnect with bounded delay
                     buf.extend(chunk)

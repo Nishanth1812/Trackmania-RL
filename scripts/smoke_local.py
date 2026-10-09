@@ -409,7 +409,9 @@ def cmd_environment(episodes: int) -> int:
                 print(f"[{ep}] FAIL: stream died at episode end (live_ok={live_ok} steps={n})", flush=True)
                 continue
             dist = math.dist((t1.pos_x, t1.pos_y, t1.pos_z), start)
-            passed = live_ok and n > 30 and dist > 1.0
+            # ~100 ms per loop iteration (pad update + sleep granularity), so ~30
+            # steps per 3 s window; the gate is sustained fresh control, not a count.
+            passed = live_ok and n >= 20 and dist > 1.0
             ok += passed
             print(f"[{ep}] {'PASS' if passed else 'FAIL'}: reset_moved={reset_moved:.1f}m gas_seen={max_gas:.2f} max_speed={max_spd:.1f} moved={dist:.1f}m steps={n} live_ok={live_ok}", flush=True)
         print(f"Environment: {ok}/{episodes} live episodes OK.", flush=True)
