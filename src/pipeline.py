@@ -62,6 +62,7 @@ def rtgym_config():
         "interface_kwargs": {"smoke": smoke, "route_path": _route_path()},
         "time_step_duration": 0.05,
         "start_obs_capture": 0.05,
+        "time_step_timeout_factor": 1.0,
         "act_in_obs": True,
         "act_buf_len": 2,
         "reset_act_buf": True,

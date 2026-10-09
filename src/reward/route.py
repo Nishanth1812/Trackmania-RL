@@ -30,7 +30,7 @@ LATERAL_SCALE_M = 10.0
 
 PROGRESS_WEIGHT = 0.1
 BACKWARD_WEIGHT = 0.1
-FINISH_BONUS = 100.0
+FINISH_BONUS = 10.0  # PLAN Phase I: one +10 award on the first valid game finish
 
 
 @dataclass(frozen=True)
