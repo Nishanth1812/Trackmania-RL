@@ -2,13 +2,13 @@
 
 > **For implementers:** use `superpowers:executing-plans` to implement the checkboxes in order. This document is an implementation plan; project commands introduced below must be written before they can be run.
 
-**Goal:** train one car to finish one Trackmania 2020 track, using local Windows policy inference and SAC training on a Modal L4 GPU function.
+**Goal:** train one car to finish one Trackmania 2020 track, using local Windows policy inference and SAC training on a Modal T4 GPU function.
 
-**Architecture:** Windows runs the game, Openplanet, the real-time environment, and one TMRL `RolloutWorker`. A Modal function on one L4 GPU runs the TMRL `Server` and `Trainer`, including replay memory and SAC updates, with state kept on a Modal Volume. Experiences and actor weights cross a TLS-protected, password-authenticated Modal TCP tunnel asynchronously; driving actions never require a remote response.
+**Architecture:** Windows runs the game, Openplanet, the real-time environment, and one TMRL `RolloutWorker`. A Modal function on one T4 GPU runs the TMRL `Server` and `Trainer`, including replay memory and SAC updates, with state kept on a Modal Volume. Experiences and actor weights cross a TLS-protected, password-authenticated Modal TCP tunnel asynchronously; driving actions never require a remote response.
 
-**Tech stack:** Python 3.12, TMRL 0.7.1, CPU PyTorch on Windows, CUDA PyTorch on Modal, NumPy, Gymnasium, rtgym, vgamepad on Windows, Modal (L4 function, Volume, Dict, Secret).
+**Tech stack:** Python 3.12, TMRL 0.7.1, CPU PyTorch on Windows, CUDA PyTorch on Modal, NumPy, Gymnasium, rtgym, vgamepad on Windows, Modal (T4 function, Volume, Dict, Secret).
 
-**Specification:** the project brief supplied with this task. Required constraints: Trackmania 2020; Openplanet; TMRL; SAC; telemetry/road observations; one local worker; remote training on a Modal L4 GPU function (revised from the original 1 vCPU / 3 GB CPU VM); authenticated, encrypted transport; unattended episodes.
+**Specification:** the project brief supplied with this task. Required constraints: Trackmania 2020; Openplanet; TMRL; SAC; telemetry/road observations; one local worker; remote training on a Modal T4 GPU function (revised from the original 1 vCPU / 3 GB CPU VM); authenticated, encrypted transport; unattended episodes.
 
 **Reviewed:** 2026-10-07. This root file is the implementation entry point; the earlier document under `docs/superpowers/plans/` remains a prior draft.
 
@@ -16,7 +16,7 @@
 
 - Trackmania, Openplanet, observations, reward/reset logic, and every driving decision run on Windows.
 - The Modal function runs only the experience relay, replay memory, and SAC trainer; no per-action network request is permitted.
-- Prove the Modal L4 trainer by benchmarking, restart-from-checkpoint, and running the pipeline; measure cost per run and whether the GPU helps at this network size.
+- Prove the Modal T4 trainer by benchmarking, restart-from-checkpoint, and running the pipeline; measure cost per run and whether the GPU helps at this network size.
 - Use TMRL 0.7.1 and its existing MLP/SAC/replay/networking implementations. Windows inference is CPU PyTorch; only the Modal trainer uses CUDA.
 - V1 uses telemetry and a recorded route; screenshot-derived LIDAR, image observations, CNNs, multiple-track learning, and other algorithms are outside V1.
 - The Modal tunnel is a public TCP endpoint: require TMRL TLS with a pinned certificate plus a unique TMRL password, and tunnel only port 55555.
@@ -36,7 +36,7 @@
 
 ### Required for V1
 
-- One simple, flat, paved Stadium-car track, one Windows worker, one Modal L4 trainer.
+- One simple, flat, paved Stadium-car track, one Windows worker, one Modal T4 trainer.
 - Local continuous policy inference at 20 Hz, measured before training.
 - Telemetry-only observations with a small amount of recorded route information.
 - Record that route after the distributed plumbing checks; earlier smoke tests use fixed dummy route features.
@@ -71,7 +71,7 @@ Use a new run name and observation schema for this interface. TMRL's bundled pre
 
 TMRL 0.7.1 is the verified release baseline. Freeze the actual dependency versions after the smoke tests; do not follow a moving upstream branch during an experiment. [Release history](https://github.com/trackmania-rl/tmrl/releases).
 
-The Modal L4 trainer's usefulness is an engineering hypothesis until M6/M8 pass. A GPU does not speed up the real-time game, which produces about 20 samples/second; it allows a higher update ratio, larger batches/networks, and a bigger replay buffer. No lap-time or convergence guarantee follows from the hardware. The upstream installation guide assumes an NVIDIA training GPU, which matches this setup. [Upstream prerequisites](https://github.com/trackmania-rl/tmrl/blob/v0.7.1/readme/Install.md).
+The Modal T4 trainer's usefulness is an engineering hypothesis until M6/M8 pass. A GPU does not speed up the real-time game, which produces about 20 samples/second; it allows a higher update ratio, larger batches/networks, and a bigger replay buffer. No lap-time or convergence guarantee follows from the hardware. The upstream installation guide assumes an NVIDIA training GPU, which matches this setup. [Upstream prerequisites](https://github.com/trackmania-rl/tmrl/blob/v0.7.1/readme/Install.md).
 
 ### Approach choice
 
@@ -97,7 +97,7 @@ flowchart TB
         W -->|experience records| Q[Episode buffer]
         A[Latest local actor weights] --> W
     end
-    subgraph VM[Modal L4 function]
+    subgraph VM[Modal T4 function]
         S[TMRL Server / relay]
         T[TMRL Trainer]
         R[Replay buffer in trainer RAM]
@@ -177,7 +177,7 @@ trackmania-rl/
 ├── tracks/
 │   └── v1/                        # Map identity, route.npz, metadata.json
 ├── deployment/
-│   └── modal_app.py               # Modal image, L4 trainer function, tunnel, echo/benchmark/gpu_check
+│   └── modal_app.py               # Modal image, T4 trainer function, tunnel, echo/benchmark/gpu_check
 ├── docs/superpowers/plans/
 ├── logs/                           # Ignored; JSONL and optional TensorBoard
 ├── checkpoints/                    # Ignored locally; trainer state lives on the Modal Volume
@@ -556,7 +556,7 @@ This mapping comes from the `TMRL_GrabData.op` source shipped in the official [r
 
 ### Phase F — Remote endpoint (Modal tunnel)
 
-**Goal:** Windows reaches a TMRL endpoint hosted in a Modal L4 function through a raw-TCP tunnel, with authentication and TLS, and the endpoint address is discoverable automatically.
+**Goal:** Windows reaches a TMRL endpoint hosted in a Modal T4 function through a raw-TCP tunnel, with authentication and TLS, and the endpoint address is discoverable automatically.
 
 **Files/configuration:** `deployment/modal_app.py`, `configs/windows.json`, `configs/modal.json`, a Modal secret, a Modal `Dict`.
 
@@ -583,7 +583,7 @@ app = modal.App("trackmania-rl")
 vol = modal.Volume.from_name("tmrl-state", create_if_missing=True)
 endpoint = modal.Dict.from_name("tmrl-endpoint", create_if_missing=True)
 
-@app.function(gpu="L4", image=image, volumes={"/state": vol},
+@app.function(gpu="T4", image=image, volumes={"/state": vol},
               secrets=[modal.Secret.from_name("tmrl-secrets")],
               timeout=60 * 60 * 6, max_containers=1)
 def trainer_service():
@@ -624,9 +624,9 @@ modal run deployment/modal_app.py::echo_server        # prints the tunnel addres
 
 **Completion criteria:** M5 passed; two-way TLS TCP exchange through the Modal tunnel with automatic address discovery and rejected unauthenticated clients.
 
-### Phase G — Remote GPU trainer (Modal L4)
+### Phase G — Remote GPU trainer (Modal T4)
 
-**Goal:** build the Modal image and prove SAC updates on an L4 GPU, with state that survives container restarts, before using real track experiences.
+**Goal:** build the Modal image and prove SAC updates on a T4 GPU, with state that survives container restarts, before using real track experiences.
 
 **Files/configuration:** `deployment/modal_app.py`, `src/pipeline.py`, `scripts/benchmark_trainer.py`, `configs/modal.json`, the `tmrl-state` Volume.
 
@@ -650,11 +650,11 @@ image = (
 modal run deployment/modal_app.py::gpu_check
 ```
 
-Expected: `torch.cuda.is_available()` is `True`, device name contains `L4`, headless `from tmrl.networking import Server, Trainer` imports succeed, no game/window is created. If an import complains about `libGL`, install the named library in the image; do not install Trackmania, a virtual controller, or a live environment in the container.
+Expected: `torch.cuda.is_available()` is `True`, device name contains `T4`, headless `from tmrl.networking import Server, Trainer` imports succeed, no game/window is created. If an import complains about `libGL`, install the named library in the image; do not install Trackmania, a virtual controller, or a live environment in the container.
 
 - [ ] Construct `TorchTrainingOffline` with `env_cls=(observation_space, action_space)` and `device='cuda'`. Construct `GenericTorchMemory(memory_size=<MEMORY_SIZE>, batch_size=<BATCH_SIZE>)` and `SpinupSacAgent` with the common settings. [Headless spaces-tuple tutorial](https://github.com/trackmania-rl/tmrl/blob/v0.7.1/tmrl/tuto/tuto_minimal_pendulum.py).
 - [ ] Confirm the **actor published to Windows is a CPU copy** and loads with `map_location='cpu'`. Windows inference stays CPU-only (`CUDA_INFERENCE=false`); only the trainer uses CUDA.
-- [ ] Benchmark 1,000 complete SAC updates on synthetic batches with the exact final spaces, networks, entropy tuning, and optimizer settings, replay sampling included, on the L4. Also record the same benchmark on CPU to show whether the GPU is actually helping at this network size.
+- [ ] Benchmark 1,000 complete SAC updates on synthetic batches with the exact final spaces, networks, entropy tuning, and optimizer settings, replay sampling included, on the T4. Also record the same benchmark on CPU to show whether the GPU is actually helping at this network size.
 
 ```powershell
 modal run deployment/modal_app.py::benchmark --updates 1000 --replay-size 1000000
@@ -663,8 +663,8 @@ modal run deployment/modal_app.py::benchmark --updates 1000 --replay-size 100000
 - [ ] Verify finite losses and changed actor parameters; targets and optimizer state must exist. Save the trainer checkpoint to `/state`, `vol.commit()`, start a fresh container, reload it, and perform another update.
 - [ ] **Persistence rule:** everything that must outlive a container lives under `/state` on the `tmrl-state` Volume (`weights/`, `checkpoints/`, run manifest). Commit the volume after every checkpoint save and before the function exits. Container disk and replay RAM are otherwise lost.
 - [ ] Make `run_server_and_trainer()` start the TMRL `Server`, then the `Trainer`, in one container, keep the process alive, and exit cleanly on SIGTERM after a final checkpoint and commit. Do not start a second trainer. Modal does not provide `systemd`; restart behavior comes from the function's retry/restart policy and from you relaunching the function.
-- [ ] Choose the launch method: `modal run` (ties the run to a local terminal) or `modal deploy` plus `trainer_service.spawn()` (survives a closed terminal). Use the latter for unattended runs. Stop it explicitly with `modal app stop trackmania-rl` when finished; a running L4 bills continuously.
-- [ ] Record the cost: note the L4 per-second rate from Modal's pricing page, the container start time, the idle duty cycle, and set a Modal workspace spend limit before long runs.
+- [ ] Choose the launch method: `modal run` (ties the run to a local terminal) or `modal deploy` plus `trainer_service.spawn()` (survives a closed terminal). Use the latter for unattended runs. Stop it explicitly with `modal app stop trackmania-rl` when finished; a running T4 bills continuously.
+- [ ] Record the cost: note the T4 per-second rate from Modal's pricing page, the container start time, the idle duty cycle, and set a Modal workspace spend limit before long runs.
 - [ ] Generate the Modal effective config from `configs/common.json` + `configs/modal.json` inside the image, reading the password from the secret. Point every project path at `/state/weights` and `/state/checkpoints`; avoid resuming a default run.
 
 ```bash
@@ -672,7 +672,7 @@ modal run deployment/modal_app.py::benchmark --updates 1000 --replay-size 100000
 python scripts/bootstrap_config.py --profile modal --server 127.0.0.1 --run-name pipeline_smoke --smoke
 ```
 
-**Expected output:** CUDA available on an L4, successful headless imports, finite synthetic losses on the GPU, a CPU-loadable actor, checkpoint survival across a container restart.
+**Expected output:** CUDA available on a T4, successful headless imports, finite synthetic losses on the GPU, a CPU-loadable actor, checkpoint survival across a container restart.
 
 **Verification:** benchmark with the intended replay capacity and the intended batch/network sizes, not an empty buffer. Target at least the updates/second needed for the configured update ratio (Section 8), with headroom.
 
@@ -833,7 +833,7 @@ Distances are in game metres. The high-water progress rule prevents earning the 
 
 ### Phase J — SAC training
 
-**Goal:** start a controlled learning run with settings for the Modal L4 trainer.
+**Goal:** start a controlled learning run with settings for the Modal T4 trainer.
 
 **Files/configuration:** common hyperparameters, resolved dependency/run manifests, `src/pipeline.py`, logging in `train.py`.
 
@@ -863,7 +863,7 @@ Reuse `SpinupSacAgent`; do not implement a second SAC loop. Its learning targets
 
 The 2,000-step setting delays optimization; it does **not** automatically implement a special random-action warmup. Its upstream accounting includes reset records, so log valid transitions separately rather than describing this threshold as exactly 2,000 valid transitions. Collect with the untrained stochastic actor initially. If additional exploration is later justified, make it explicit and retain the native action mapping.
 
-The update ratio counts **minibatch optimizer updates**, not individual samples used inside the minibatch. At 20 new transitions/second and ratio 1.0, the target is 20 updates/second, each reusing 256 replay samples. `TorchTrainingOffline` can cap this ratio and wait for data; it cannot guarantee that the hardware reaches it, and waiting for data on an L4 still bills. [Training scheduler](https://github.com/trackmania-rl/tmrl/blob/v0.7.1/tmrl/training_offline.py).
+The update ratio counts **minibatch optimizer updates**, not individual samples used inside the minibatch. At 20 new transitions/second and ratio 1.0, the target is 20 updates/second, each reusing 256 replay samples. `TorchTrainingOffline` can cap this ratio and wait for data; it cannot guarantee that the hardware reaches it, and waiting for data on a T4 still bills. [Training scheduler](https://github.com/trackmania-rl/tmrl/blob/v0.7.1/tmrl/training_offline.py).
 
 **Exact tasks**
 
@@ -943,13 +943,13 @@ python -c "import modal; modal.Function.from_name('trackmania-rl','trainer_servi
 - [ ] If trainer throughput cannot support the intended ratio, reduce it (for example 0.5) or use batch 128, rerun the benchmark, and report the change.
 - [ ] Change GPU or container memory only when evidence in Section 8 justifies it. Keep inference on Windows.
 - [ ] Compare 64/64 versus 256/256 hidden layers and different replay sizes only as single-variable experiments with frozen-policy evaluations.
-- [ ] Compare L4 cost per useful update with the CPU benchmark; stop the L4 function between sessions. Telemetry collection from one real-time worker can itself limit useful training throughput.
+- [ ] Compare T4 cost per useful update with the CPU benchmark; stop the T4 function between sessions. Telemetry collection from one real-time worker can itself limit useful training throughput.
 
 **Expected output:** an evidence-backed keep/upgrade decision and improved evaluation at a known resource cost.
 
 **Verification:** rerun the exact benchmark and 20/100-episode evaluation after a change. Hardware improvement is not evidence of driving improvement by itself.
 
-**Common failures:** larger network slows training without helping progress, unlimited replay/queues, local-inference changes break action timing, more updates amplify poor reward, idle L4 time billed while the worker is offline, treating one utilization graph as proof of insufficient capacity.
+**Common failures:** larger network slows training without helping progress, unlimited replay/queues, local-inference changes break action timing, more updates amplify poor reward, idle T4 time billed while the worker is offline, treating one utilization graph as proof of insufficient capacity.
 
 **Completion criteria:** M13 improving with repeatable results; all V1 reliability/security checks retained.
 
@@ -1025,9 +1025,9 @@ Then open `http://localhost:6006`. Keep local worker episode logs separately unl
 
 Checkpoints initially save every 1,000 updates and each save is followed by `volume.commit()`, approximately a minute at 20 updates/second. Use TMRL's checkpoint hook and atomic save behavior; retain the last known valid checkpoint plus the best evaluation actor. Verify replay and optimizer counters survive restart. Changes to checkpoint format or code revision require a load/update test before deployment. [Checkpoint persistence implementation](https://github.com/trackmania-rl/tmrl/blob/v0.7.1/tmrl/util.py).
 
-## 8. Is the Modal L4 trainer sized sensibly?
+## 8. Is the Modal T4 trainer sized sensibly?
 
-**Yes, with a caveat.** A 21-float input and a 256/256 MLP is a small model; an L4 has far more capacity than this workload needs, and the real limit is the single real-time game worker (about 20 samples/second). A GPU mainly buys a higher update ratio, larger batches, and a bigger replay buffer, not faster driving data. Measure before assuming a benefit: at 64/64 and batch 64 the CPU could match the GPU, which is why Phase G benchmarks both.
+**Yes, with a caveat.** A 21-float input and a 256/256 MLP is a small model; a T4 should be more than this workload needs (M6 measures it), and the real limit is the single real-time game worker (about 20 samples/second). A GPU mainly buys a higher update ratio, larger batches, and a bigger replay buffer, not faster driving data. Measure before assuming a benefit: at 64/64 and batch 64 the CPU could match the GPU, which is why Phase G benchmarks both.
 
 ### Initial resource limits
 
@@ -1039,17 +1039,17 @@ Checkpoints initially save every 1,000 updates and each save is followed by `vol
 | Update ratio | 1.0 | Raise only if actor age and updates/second show headroom; lower if updates outrun fresh data and overfit |
 | Workers | 1 | Additional workers are outside V1 |
 | Replay precision | float32 | No float64 arrays |
-| GPU | 1 × L4 | Larger GPU only if the trainer is measured as the bottleneck |
+| GPU | 1 × T4 | Larger GPU only if the trainer is measured as the bottleneck |
 | Checkpoint | Every 1,000 updates, committed to the Volume | Keep last valid + best actor |
 | Container | `max_containers=1`, memory set explicitly | Increase memory if replay + checkpoint peaks need it |
 
 Replay payload estimate: roughly 186 bytes per transition, so about **186 MB for 1,000,000 transitions**. This is a payload estimate, **not the memory allocation of `GenericTorchMemory`**: Python lists, metadata, transport copies, and checkpoint serialization increase it. Measure the container with replay full and a checkpoint save in progress. Keep transition `info` small.
 
-At 20 valid transitions/second, 1,000,000 transitions take about 14 hours of collection to fill; the buffer will hold the whole early run. At update ratio 1.0, the trainer must sustain about 20 updates/second plus ingestion; an L4 does this easily, so check the actual number in the benchmark.
+At 20 valid transitions/second, 1,000,000 transitions take about 14 hours of collection to fill; the buffer will hold the whole early run. At update ratio 1.0, the trainer must sustain about 20 updates/second plus ingestion; a T4 should do this, so check the actual number in the benchmark.
 
 ### Cost and lifecycle
 
-- An L4 function bills while the container runs, including when waiting for the worker. A run that waits idle overnight still costs money.
+- An T4 function bills while the container runs, including when waiting for the worker. A run that waits idle overnight still costs money.
 - Run the trainer only while Windows is collecting. Stop it with `modal app stop trackmania-rl` when finishing; the checkpoint remains on the Volume.
 - Set a workspace spend limit. Record start/stop times and cost per run.
 - Container restarts change the tunnel address; the supervisor must re-read the endpoint and restart the worker at an episode boundary.
@@ -1057,7 +1057,7 @@ At 20 valid transitions/second, 1,000,000 transitions take about 14 hours of col
 ### Trainer acceptance test
 
 - [ ] No OOM or container kill with full replay and a checkpoint save.
-- [ ] `torch.cuda.is_available()` true on L4; actor published as CPU tensors.
+- [ ] `torch.cuda.is_available()` true on T4; actor published as CPU tensors.
 - [ ] Updates/second meets the configured ratio with headroom, measured with replay sampling.
 - [ ] Actor age stays below the 180-second pause threshold during active collection.
 - [ ] Received sample rate tracks generated rate; transport backlog does not trend upward.
@@ -1066,7 +1066,7 @@ At 20 valid transitions/second, 1,000,000 transitions take about 14 hours of col
 
 ### Change hardware only when
 
-- GPU utilization and update throughput show the L4 is the sustained bottleneck at the intended ratio.
+- GPU utilization and update throughput show the T4 is the sustained bottleneck at the intended ratio.
 - Checkpoint or replay memory approaches the container limit.
 - Learning/evaluation supports a larger network or higher update ratio, and profiling identifies the trainer as the bottleneck.
 
@@ -1084,7 +1084,7 @@ Do not move to the next engineering gate while the preceding integration gate fa
 | M3 — Automatic reset | 100/100 full-start resets, including after official checkpoint and finish |
 | M4 — Local TMRL baseline | Custom telemetry worker runs ten episodes; spaces/replay contract and timing verified |
 | M5 — Windows ↔ Modal | TLS TCP echo through the tunnel; wrong cert/password rejected; address auto-discovered; actual TMRL authentication subsequently verified |
-| M6 — Modal SAC updates | 1,000 finite L4 updates, actor changes, full replay, checkpoint restart across a container restart |
+| M6 — Modal SAC updates | 1,000 finite T4 updates, actor changes, full replay, checkpoint restart across a container restart |
 | M7 — Weights return | Published actor hash loads locally; fixed-observation behavior verified |
 | M8 — Unattended pipeline | At least 1,000 episodes/resets and eight-hour actual-track soak; interruption recovery; bounded memory |
 | M9 — 25% progress | Frozen-policy evaluation reaches ≥25% valid maximum progress |
@@ -1143,12 +1143,12 @@ game integration (A)
 → optimization (L)
 ```
 
-The first deliverable is a reliable locally controlled environment. The second is a verified authenticated experience/weight round-trip with measured L4 capacity and restart recovery. Learning starts only after both and the track/reward checks pass.
+The first deliverable is a reliable locally controlled environment. The second is a verified authenticated experience/weight round-trip with measured T4 capacity and restart recovery. Learning starts only after both and the track/reward checks pass.
 
 ## 12. Plan validation and limits
 
 This plan was reviewed on 2026-10-07 against TMRL 0.7.1 source at revision `10266a7d2351e727f51ab302b3dd6592895d1763`; the release tag was checked directly. The bundled v0.6.0 resource archive was inspected to verify the plugin packet and configuration fields. Current official PyTorch and Modal documentation (tunnels, GPUs) informed the installation/networking steps.
 
-The repository contains the initial README and an earlier planning document; all project-specific scripts and modules described above remain to be implemented. Python 3.12 (64-bit) is installed locally. The game's current plugin/control behavior and the Modal image, L4 performance, tunnel behavior, TLS configuration, and cost still require the phase gates.
+The repository contains the initial README and an earlier planning document; all project-specific scripts and modules described above remain to be implemented. Python 3.12 (64-bit) is installed locally. The game's current plugin/control behavior and the Modal image, T4 performance, tunnel behavior, TLS configuration, and cost still require the phase gates.
 
 No game-control tests, Modal benchmarks, network tests, or training runs were performed when writing this plan. Throughput/memory thresholds, feature choices, reward coefficients, and consistency criteria are proposed engineering defaults, not reported experimental results.

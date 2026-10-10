@@ -6,7 +6,7 @@ From the repo root (Modal secret `tmrl-secrets` must exist: TMRL_PASSWORD, TLS_C
     .\\.venv\\Scripts\\python.exe -m modal run deployment/modal_app.py::benchmark --updates 1000
     .\\.venv\\Scripts\\python.exe -m modal deploy deployment/modal_app.py   # then trainer_service.spawn()
 
-Stop a running trainer with `modal app stop trackmania-rl`; a running L4 bills continuously.
+Stop a running trainer with `modal app stop trackmania-rl`; a running T4 bills continuously.
 Training spend is capped at BUDGET_USD in total across runs (ledger on the Volume); the workspace limit in Modal billing is a second backstop.
 """
 import json
@@ -27,13 +27,13 @@ APP_DIR = "/app"
 STATE_DIR = "/state"
 HOSTNAME = "default"  # matches the certificate and TMRL HOSTNAME; the cert is pinned, not the Modal host
 
-# Spend guard for the whole project. Modal bills the L4 at $0.000222/s (~$0.80/h); CPU and memory
+# Spend guard for the whole project. Modal bills the T4 at $0.000164/s (~$0.59/h); CPU and memory
 # bill on top, so COST_FACTOR adds 25%. Every trainer_service run adds its seconds to a ledger on the
 # Volume and stops once the total across all runs reaches BUDGET_USD. MAX_RUN_S is the per-call backstop.
 BUDGET_USD = 5.0
-L4_USD_PER_S = 0.000222
+T4_USD_PER_S = 0.000164
 COST_FACTOR = 1.25
-MAX_RUN_S = int(BUDGET_USD / (L4_USD_PER_S * COST_FACTOR))  # 18018 s: one run alone cannot exceed the budget
+MAX_RUN_S = int(BUDGET_USD / (T4_USD_PER_S * COST_FACTOR))  # 24390 s: one run alone cannot exceed the budget
 SPENT_SEED_USD = 1.0  # estimate of spend before the ledger existed (checks M5-M7); replace with the Modal dashboard figure
 LEDGER = Path(STATE_DIR) / "spend.json"
 
@@ -50,7 +50,7 @@ def _local_env() -> dict:
 
 
 def _usd(seconds: float) -> float:
-    return seconds * L4_USD_PER_S * COST_FACTOR
+    return seconds * T4_USD_PER_S * COST_FACTOR
 
 
 def _ledger_seconds() -> float:
@@ -150,13 +150,13 @@ def echo_check():
 
 
 # ---------------------------------------------------------------- M6: GPU, benchmark, checkpoint restart
-@app.function(image=image, gpu="L4", timeout=600)
+@app.function(image=image, gpu="T4", timeout=600)
 def gpu_check():
     import torch
 
     assert torch.cuda.is_available(), "CUDA is not available"
     name = torch.cuda.get_device_name(0)
-    assert "L4" in name, f"expected an L4, got {name}"
+    assert "T4" in name, f"expected a T4, got {name}"
     from tmrl.networking import Server, Trainer  # noqa: F401  (headless import check)
 
     x = torch.randn(1024, 1024, device="cuda")
@@ -216,7 +216,7 @@ def _run_updates(device, updates):
     return agent, updates / elapsed
 
 
-@app.function(image=image, gpu="L4", volumes={STATE_DIR: vol}, timeout=1800)
+@app.function(image=image, gpu="T4", volumes={STATE_DIR: vol}, timeout=1800)
 def resume_check():
     """Runs in a fresh container: reload the committed checkpoint and perform another update."""
     import math
@@ -236,7 +236,7 @@ def resume_check():
     print(f"PASS resume_check: restored checkpoint (updates={state['updates']}) and updated again", flush=True)
 
 
-@app.function(image=image, gpu="L4", volumes={STATE_DIR: vol}, timeout=3600)
+@app.function(image=image, gpu="T4", volumes={STATE_DIR: vol}, timeout=3600)
 def benchmark_remote(updates: int = 1000):
     import torch
 
@@ -272,7 +272,7 @@ def _wait_port(port, timeout=60.0):
 
 
 @app.function(
-    image=image, gpu="L4", volumes={STATE_DIR: vol}, secrets=secrets,
+    image=image, gpu="T4", volumes={STATE_DIR: vol}, secrets=secrets,
     timeout=MAX_RUN_S, max_containers=1,
 )
 def trainer_service(run_name: str = "pipeline_smoke", smoke: bool = True):
